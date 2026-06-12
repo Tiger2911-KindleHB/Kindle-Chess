@@ -1936,25 +1936,41 @@ static gboolean on_draw(GtkWidget* widget, GdkEventExpose*, gpointer) {
 
     if (app.pendingFrom >= 0) {
         double ox = L.boardX + L.board * 0.1;
-        double oy = L.boardY + L.board * 0.36;
+        double oy = L.boardY + L.board * 0.34;
         double ow = L.board * 0.8;
-        double oh = std::max(190.0, L.board * 0.28);
+        double oh = std::max(230.0, L.board * 0.34);
         cairo_set_source_rgb(cr, 0.92, 0.92, 0.90);
         cairo_rectangle(cr, ox, oy, ow, oh);
         cairo_fill_preserve(cr);
         cairo_set_source_rgb(cr, 0.0, 0.0, 0.0);
         cairo_set_line_width(cr, 3.0);
         cairo_stroke(cr);
-        drawTextCentered(cr, "Promote to", ox, oy + 8, ow, 38, app.uiFontSize, true);
-        const char* opts[4] = {"Q", "R", "B", "N"};
+        drawTextCentered(cr, "Promote to", ox, oy + 10, ow, 46, app.uiFontSize, true);
+
+        const char promos[4] = {'q', 'r', 'b', 'n'};
+        const char* labels[4] = {"Q", "R", "B", "N"};
+        char sourcePawn = '.';
+        if (app.pendingFrom >= 0 && app.pendingFrom < 64) sourcePawn = app.game.state().b[app.pendingFrom];
+        bool promoteWhite = is_white_piece(sourcePawn);
+
         for (int i = 0; i < 4; ++i) {
             double x = ox + 18 + i * (ow - 36) / 4.0;
-            double y = oy + 58;
+            double y = oy + 68;
             double w = (ow - 52) / 4.0;
-            double h = oh - 76;
+            double h = oh - 88;
+            cairo_set_source_rgb(cr, 0.96, 0.96, 0.94);
             cairo_rectangle(cr, x, y, w, h);
+            cairo_fill_preserve(cr);
+            cairo_set_source_rgb(cr, 0.0, 0.0, 0.0);
             cairo_stroke(cr);
-            drawTextCentered(cr, opts[i], x, y, w, h, std::max(30, app.uiFontSize + 8), true);
+
+            char displayPiece = promoteWhite ? (char)std::toupper((unsigned char)promos[i]) : promos[i];
+            double pieceSize = std::min(w, h) * 0.86;
+            double px = x + (w - pieceSize) / 2.0;
+            double py = y + (h - pieceSize) / 2.0;
+            if (!drawPieceImage(cr, displayPiece, px, py, pieceSize)) {
+                drawTextCentered(cr, labels[i], x, y, w, h, std::max(30, app.uiFontSize + 8), true);
+            }
         }
     }
 
@@ -2028,6 +2044,13 @@ static void commitHumanMove(int from, int to, char promo = 0) {
     app.gameOverText.clear();
     app.hintFrom = app.hintTo = -1;
     clearPendingMoveConfirm();
+
+    // Promotion used a separate pendingFrom/pendingTo overlay.  If these are
+    // not cleared before committing the selected promotion, the promotion
+    // popup can remain active after the move and trap all subsequent taps.
+    app.pendingFrom = -1;
+    app.pendingTo = -1;
+
     if (app.game.makeMove(from, to, promo)) {
         app.game.save();
         app.selected = -1;

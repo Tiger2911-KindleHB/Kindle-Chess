@@ -411,3 +411,8 @@ If distributing a build that includes Stockfish, comply with Stockfish's GPLv3 l
 ## Status
 
 KindleChess is under active homebrew development and is currently targeted at jailbroken Kindle devices launched through KUAL.
+
+### Promotion popup
+
+Pawn promotion uses the same custom PNG piece set as the main board when images are available. If a custom promotion image is missing or invalid, KindleChess falls back to a large text label.
+
