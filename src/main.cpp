@@ -940,7 +940,7 @@ struct App {
 
     bool showCoordinates = true;
     bool showMoveList = true;
-    int uiFontSize = 22;
+    int uiFontSize = 40;
     bool usePieceImages = true;
     bool pieceImagesLoaded = false;
     std::array<GdkPixbuf*, 128> pieceImages{};
@@ -1269,9 +1269,18 @@ static std::string pieceLetter(char p) {
 
 static void drawTextCentered(cairo_t* cr, const std::string& text, double x, double y, double w, double h, double size, bool bold=false) {
     cairo_select_font_face(cr, "sans-serif", CAIRO_FONT_SLANT_NORMAL, bold ? CAIRO_FONT_WEIGHT_BOLD : CAIRO_FONT_WEIGHT_NORMAL);
-    cairo_set_font_size(cr, size);
-    cairo_text_extents_t ext;
-    cairo_text_extents(cr, text.c_str(), &ext);
+
+    // Kindle users may intentionally run very large UI fonts.  Keep labels inside
+    // their rectangles rather than letting text spill outside buttons/popups.
+    double fitted = std::max(8.0, size);
+    cairo_text_extents_t ext{};
+    for (;;) {
+        cairo_set_font_size(cr, fitted);
+        cairo_text_extents(cr, text.c_str(), &ext);
+        if ((ext.width <= std::max(4.0, w - 10.0) && ext.height <= std::max(4.0, h - 6.0)) || fitted <= 8.0) break;
+        fitted -= 1.0;
+    }
+
     double tx = x + (w - ext.width) / 2.0 - ext.x_bearing;
     double ty = y + (h - ext.height) / 2.0 - ext.y_bearing;
     cairo_move_to(cr, tx, ty);
@@ -1290,10 +1299,11 @@ static std::vector<std::string> toolbarLabels() {
 }
 
 static int buttonWidthFor(const std::string& label) {
-    int base = 46 + (int)label.size() * std::max(8, app.uiFontSize / 2);
-    if (label.rfind("Engine", 0) == 0) base += 22;
-    if (label.rfind("Elo", 0) == 0) base += 18;
-    return clampInt(base, 78, 190);
+    int charW = std::max(10, (int)(app.uiFontSize * 0.60));
+    int base = 58 + (int)label.size() * charW;
+    if (label.rfind("Engine", 0) == 0) base += 26;
+    if (label.rfind("Elo", 0) == 0) base += 22;
+    return clampInt(base, 92, 260);
 }
 
 static int toolbarHeightFor(int W) {
@@ -1320,6 +1330,7 @@ struct Layout {
     int board = 0, boardX = 0, boardY = 0, cell = 0;
     bool hasPanel = false;
     int panelX = 0, panelY = 0, panelW = 0, panelH = 0;
+    int capturedH = 0;
 };
 
 static Layout computeLayout(GtkWidget* widget) {
@@ -1329,12 +1340,19 @@ static Layout computeLayout(GtkWidget* widget) {
     L.W = a.width; L.H = a.height;
     L.margin = 8;
     L.topH = toolbarHeightFor(L.W);
-    L.statusH = std::max(74, app.uiFontSize * 3 + 14);
+    L.statusH = std::max(88, app.uiFontSize * 3 + 18);
 
     int availableW = L.W - 2 * L.margin;
-    int availableH = L.H - L.topH - L.statusH - 2 * L.margin;
     int requestedPanelW = app.showMoveList ? std::max(160, app.uiFontSize * 8) : 0;
     L.hasPanel = app.showMoveList && L.W >= 850 && requestedPanelW + 360 < availableW;
+
+    // If there is no side panel, captured pieces live below the board.  Reserve
+    // explicit vertical space for them so large UI fonts do not cause that area
+    // to be clipped away by the board/status region.
+    L.capturedH = L.hasPanel ? 0 : std::max(94, std::min(150, app.uiFontSize * 2 + 38));
+
+    int availableH = L.H - L.topH - L.statusH - 2 * L.margin - L.capturedH;
+    if (availableH < 240) availableH = L.H - L.topH - L.statusH - 2 * L.margin;
     int boardAreaW = availableW - (L.hasPanel ? requestedPanelW + L.margin : 0);
     int boardMax = std::min(boardAreaW, availableH);
     L.board = boardMax - (boardMax % 8);
@@ -1432,18 +1450,25 @@ static void drawCapturedPieces(cairo_t* cr, const Layout& L) {
     auto caps = app.game.capturedPieces();
     int cell = std::max(20, std::min(34, app.uiFontSize + 8));
     if (L.hasPanel) {
-        int y = L.panelY + L.panelH - cell * 2 - 34;
-        if (y < L.panelY + 80) return;
+        int y = L.panelY + L.panelH - cell * 2 - 38;
+        if (y < L.panelY + 86) return;
         cairo_set_source_rgb(cr, 0.0, 0.0, 0.0);
-        drawTextCentered(cr, "Captured", L.panelX, y - 28, L.panelW, 24, std::max(13, std::min(22, app.uiFontSize - 5)), true);
+        drawTextCentered(cr, "Captured", L.panelX, y - 30, L.panelW, 26, std::max(13, std::min(22, app.uiFontSize - 5)), true);
         drawCapturedRow(cr, "White:", caps.first, L.panelX + 10, y, L.panelW - 20, cell);
-        drawCapturedRow(cr, "Black:", caps.second, L.panelX + 10, y + cell + 10, L.panelW - 20, cell);
+        drawCapturedRow(cr, "Black:", caps.second, L.panelX + 10, y + cell + 12, L.panelW - 20, cell);
     } else {
-        int y = L.boardY + L.board + 8;
-        if (y + cell * 2 + 8 > L.H - L.statusH) return;
+        int areaTop = L.boardY + L.board + 8;
+        int areaBottom = L.H - L.statusH - 8;
+        int available = areaBottom - areaTop;
+        if (available <= 38) return;
+
+        int rowGap = 8;
+        int fittedCell = std::min(cell, std::max(16, (available - rowGap) / 2));
+        int y = areaTop + std::max(0, (available - (fittedCell * 2 + rowGap)) / 2);
+
         cairo_set_source_rgb(cr, 0.0, 0.0, 0.0);
-        drawCapturedRow(cr, "White captured:", caps.first, L.boardX, y, L.board, cell);
-        drawCapturedRow(cr, "Black captured:", caps.second, L.boardX, y + cell + 8, L.board, cell);
+        drawCapturedRow(cr, "White captured:", caps.first, L.boardX, y, L.board, fittedCell);
+        drawCapturedRow(cr, "Black captured:", caps.second, L.boardX, y + fittedCell + rowGap, L.board, fittedCell);
     }
 }
 
@@ -1457,7 +1482,7 @@ static void drawMovePanel(cairo_t* cr, const Layout& L) {
     cairo_stroke(cr);
     drawTextCentered(cr, "Moves", L.panelX, L.panelY + 6, L.panelW, 30, std::max(16, std::min(26, app.uiFontSize - 2)), true);
     int lineH = std::max(20, std::min(34, app.uiFontSize + 4));
-    int capturedReserve = 120;
+    int capturedReserve = std::max(124, std::min(178, app.uiFontSize * 2 + 72));
     int maxLines = std::max(1, (L.panelH - 48 - capturedReserve) / lineH);
     auto lines = moveHistoryLines(maxLines);
     int y = L.panelY + 48;
@@ -1497,7 +1522,8 @@ static void drawConfirmNew(cairo_t* cr, const Layout& L) {
     cairo_stroke(cr);
     drawTextCentered(cr, "Start a new game?", ox, oy + 20, ow, 42, app.uiFontSize + 2, true);
     drawTextCentered(cr, "This will replace the current saved game.", ox + 20, oy + 76, ow - 40, 36, std::max(15, app.uiFontSize - 4), false);
-    int bw = 190, bh = 56;
+    int bw = std::max(210, std::min(280, (int)(ow / 2 - 28)));
+    int bh = std::max(60, std::min(76, app.uiFontSize + 24));
     RectButton cancel{"Cancel", (int)(ox + ow/2 - bw - 12), (int)(oy + oh - bh - 24), bw, bh};
     RectButton yes{"New Game", (int)(ox + ow/2 + 12), (int)(oy + oh - bh - 24), bw, bh};
     app.overlayButtons.push_back(cancel); app.overlayButtons.push_back(yes);
@@ -1660,7 +1686,9 @@ static void drawGameOver(cairo_t* cr, const Layout& L) {
     cairo_set_line_width(cr, 4.0);
     cairo_stroke(cr);
     drawTextCentered(cr, app.gameOverText.empty() ? "Game Over" : app.gameOverText, ox + 20, oy + 28, ow - 40, 76, app.uiFontSize + 5, true);
-    RectButton yes{"New Game", (int)(ox + ow/2 - 105), (int)(oy + oh - 82), 210, 58};
+    int bw = std::max(230, std::min(320, (int)(ow - 80)));
+    int bh = std::max(62, std::min(78, app.uiFontSize + 24));
+    RectButton yes{"New Game", (int)(ox + ow/2 - bw/2), (int)(oy + oh - bh - 24), bw, bh};
     app.overlayButtons.push_back(yes);
     drawButton(cr, yes, std::max(17, app.uiFontSize - 1));
 }

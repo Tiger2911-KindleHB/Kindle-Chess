@@ -15,8 +15,9 @@ Native GTK2 chess app for jailbroken Kindle devices, intended for KUAL launch.
 - Exit button
 - Optional board coordinates
 - Optional move-history panel
-- Captured-piece display
+- Captured-piece display with extra reserved space for large-font layouts
 - Settings overlay
+- Larger default UI font
 - A-/A+ UI font controls, up to size 50
 - Optional move confirmation popup
 - Save/resume using `/mnt/us/extensions/kindlechess/data/save.txt`
@@ -59,7 +60,7 @@ Settings include:
 - **Review Game**: enters review mode with Prev / Next / Exit Review controls.
 - **Coordinates**: toggles board coordinate labels.
 - **Move List**: toggles the move-history panel.
-- **A- / A+**: changes UI font size from 14 up to 50.
+- **A- / A+**: changes UI font size from 14 up to 50. Button labels shrink-to-fit so large fonts do not spill outside their boxes.
 - **Piece PNGs**: toggles custom piece images.
 - **Reload PNGs**: reloads custom piece images from storage.
 
@@ -211,3 +212,6 @@ white_bishop.png  white_knight.png  white_pawn.png
 black_king.png    black_queen.png   black_rook.png
 black_bishop.png  black_knight.png  black_pawn.png
 ```
+
+
+Default UI font size: 40.
