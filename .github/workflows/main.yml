@@ -33,7 +33,7 @@ jobs:
             build-essential autoconf automake bison flex gawk \
             libtool libtool-bin libncurses-dev curl file git gperf \
             help2man texinfo unzip wget sed libarchive-dev nettle-dev \
-            meson ninja-build pkg-config zip python3 make
+            meson ninja-build pkg-config zip python3 make binutils
 
       - name: Download prebuilt Kindle toolchain
         run: |
@@ -60,7 +60,7 @@ jobs:
           chmod +x ./gen-sdk.sh
           ./gen-sdk.sh "$TARGET"
 
-      - name: Locate Kindle cross file and compiler
+      - name: Locate Kindle cross file and tools
         run: |
           set -euxo pipefail
 
@@ -80,6 +80,11 @@ jobs:
           STRIPPER="$(find "$HOME/x-tools" -type f -name '*strip' | grep '/bin/' | head -n 1 || true)"
           echo "KINDLE_STRIP=$STRIPPER" >> "$GITHUB_ENV"
           echo "Using strip tool: $STRIPPER"
+
+          echo "Searching for Kindle readelf tool..."
+          READELF_TOOL="$(find "$HOME/x-tools" -type f -name '*readelf' | grep '/bin/' | head -n 1 || true)"
+          echo "KINDLE_READELF=$READELF_TOOL" >> "$GITHUB_ENV"
+          echo "Using readelf tool: $READELF_TOOL"
 
       - name: Build KindleChess app
         run: |
@@ -102,7 +107,9 @@ jobs:
 
           make clean
 
-          echo "Building Stockfish ${STOCKFISH_TAG} for Kindle ARMv7..."
+          echo "Building Stockfish ${STOCKFISH_TAG} for Kindle ARMv7 with static C++ runtime..."
+
+          export LDFLAGS="-static-libstdc++ -static-libgcc"
 
           make -j"$(nproc)" build \
             ARCH=armv7 \
@@ -117,6 +124,20 @@ jobs:
 
           install -m 0755 stockfish /tmp/stockfish-kindle
           file /tmp/stockfish-kindle
+
+          echo "Checking Stockfish dynamic dependencies..."
+          if [ -n "${KINDLE_READELF:-}" ] && [ -x "$KINDLE_READELF" ]; then
+            "$KINDLE_READELF" -d /tmp/stockfish-kindle || true
+
+            if "$KINDLE_READELF" -d /tmp/stockfish-kindle | grep -q 'libstdc++'; then
+              echo "::error::Stockfish still dynamically links libstdc++.so.6. Static runtime link failed."
+              exit 1
+            fi
+
+            if "$KINDLE_READELF" -d /tmp/stockfish-kindle | grep -q 'libgcc_s'; then
+              echo "::warning::Stockfish still dynamically links libgcc_s. It may still work, but static-libgcc did not fully apply."
+            fi
+          fi
 
       - name: Package KUAL extension
         run: |
