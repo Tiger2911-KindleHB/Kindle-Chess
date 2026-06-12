@@ -215,3 +215,21 @@ black_bishop.png  black_knight.png  black_pawn.png
 
 
 Default UI font size: 40.
+
+## UI readability changes
+
+This build makes the Settings overlay substantially larger and more readable than the board UI. Settings text is intentionally drawn about 20 points larger than the configured UI font size, while button text still shrink-fits to avoid clipping.
+
+The captured-piece display now has its own gray background box with a black border, larger labels, and larger captured-piece icons. This makes black and white pieces readable even with custom PNGs and large UI fonts.
+
+## Kindle dark-mode piece handling
+
+Settings includes:
+
+```text
+Dark Piece Fix: Auto / Off / On
+```
+
+Use **Auto** first. The app attempts to detect Kindle dark/night/inverted-display preference files. Because Kindle firmware does not provide a stable public dark-mode API for homebrew apps, use **On** if your Kindle is in dark mode and the pieces look inverted or hard to distinguish. Use **Off** for normal light mode.
+
+This setting pre-inverts the piece PNG color palette before drawing. It also swaps the fallback built-in black/white letter-piece colors so pieces remain readable under display inversion.

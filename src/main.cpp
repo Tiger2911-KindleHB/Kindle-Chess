@@ -944,6 +944,9 @@ struct App {
     bool usePieceImages = true;
     bool pieceImagesLoaded = false;
     std::array<GdkPixbuf*, 128> pieceImages{};
+    std::array<GdkPixbuf*, 128> pieceImagesInverted{};
+    // 0 = Auto, 1 = Off, 2 = On. Used for Kindle dark-mode display inversion.
+    int darkPieceMode = 0;
 
     std::vector<RectButton> overlayButtons;
 };
@@ -952,6 +955,53 @@ static App app;
 
 static int clampInt(int v, int lo, int hi) {
     return std::max(lo, std::min(hi, v));
+}
+
+static int settingsFontSize() {
+    // Settings text intentionally runs larger than the board/status UI.
+    return clampInt(app.uiFontSize + 20, 28, 64);
+}
+
+static std::string darkPieceModeLabel() {
+    if (app.darkPieceMode == 1) return "Off";
+    if (app.darkPieceMode == 2) return "On";
+    return "Auto";
+}
+
+static bool fileContainsDarkModeToken(const std::string& path) {
+    std::ifstream f(path.c_str());
+    if (!f) return false;
+    std::string line;
+    while (std::getline(f, line)) {
+        std::string l = line;
+        std::transform(l.begin(), l.end(), l.begin(), [](unsigned char c){ return (char)std::tolower(c); });
+        if ((l.find("dark") != std::string::npos || l.find("night") != std::string::npos || l.find("invert") != std::string::npos) &&
+            (l.find("true") != std::string::npos || l.find("=1") != std::string::npos || l.find(":1") != std::string::npos || l.find("on") != std::string::npos)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool detectKindleDarkMode() {
+    // Kindle firmware does not expose a stable public homebrew API for dark-mode
+    // state. Check a few common preference locations and fall back to manual mode.
+    const char* env = std::getenv("KINDLECHESS_DARK_MODE");
+    if (env && (*env == '1' || std::strcmp(env, "true") == 0 || std::strcmp(env, "on") == 0)) return true;
+    std::vector<std::string> paths{
+        "/var/local/java/prefs/com.amazon.ebook.framework/prefs",
+        "/var/local/java/prefs/com.amazon.ebook.booklet.reader/reader.pref",
+        "/var/local/system/darkmode",
+        "/var/local/system/nightmode"
+    };
+    for (const auto& path : paths) if (fileContainsDarkModeToken(path)) return true;
+    return false;
+}
+
+static bool shouldInvertPieceImages() {
+    if (app.darkPieceMode == 1) return false;
+    if (app.darkPieceMode == 2) return true;
+    return detectKindleDarkMode();
 }
 
 static void ensure_data_dir() {
@@ -1000,6 +1050,7 @@ static void saveAppSettings() {
     f << "flipped=0\n";
     f << "use_piece_images=" << (app.usePieceImages ? 1 : 0) << "\n";
     f << "confirm_moves=" << (app.confirmMoves ? 1 : 0) << "\n";
+    f << "dark_piece_mode=" << app.darkPieceMode << "\n";
 }
 
 static void loadAppSettings() {
@@ -1025,6 +1076,7 @@ static void loadAppSettings() {
         else if (key == "flipped") app.flipped = false;
         else if (key == "use_piece_images") app.usePieceImages = n != 0;
         else if (key == "confirm_moves") app.confirmMoves = n != 0;
+        else if (key == "dark_piece_mode") app.darkPieceMode = clampInt(n, 0, 2);
     }
 }
 
@@ -1199,7 +1251,35 @@ static void freePieceImages() {
             pix = nullptr;
         }
     }
+    for (auto& pix : app.pieceImagesInverted) {
+        if (pix) {
+            g_object_unref(G_OBJECT(pix));
+            pix = nullptr;
+        }
+    }
     app.pieceImagesLoaded = false;
+}
+
+static GdkPixbuf* makeInvertedPixbuf(GdkPixbuf* src) {
+    if (!src) return nullptr;
+    GdkPixbuf* dst = gdk_pixbuf_copy(src);
+    if (!dst) return nullptr;
+    int w = gdk_pixbuf_get_width(dst);
+    int h = gdk_pixbuf_get_height(dst);
+    int stride = gdk_pixbuf_get_rowstride(dst);
+    int channels = gdk_pixbuf_get_n_channels(dst);
+    guchar* pixels = gdk_pixbuf_get_pixels(dst);
+    if (!pixels || channels < 3) return dst;
+    for (int y = 0; y < h; ++y) {
+        guchar* row = pixels + y * stride;
+        for (int x = 0; x < w; ++x) {
+            guchar* px = row + x * channels;
+            px[0] = 255 - px[0];
+            px[1] = 255 - px[1];
+            px[2] = 255 - px[2];
+        }
+    }
+    return dst;
 }
 
 static GdkPixbuf* tryLoadPieceImage(char p) {
@@ -1223,6 +1303,9 @@ static void loadPieceImages() {
     const char pieces[] = {'K','Q','R','B','N','P','k','q','r','b','n','p'};
     for (char p : pieces) {
         app.pieceImages[(unsigned char)p] = tryLoadPieceImage(p);
+        if (app.pieceImages[(unsigned char)p]) {
+            app.pieceImagesInverted[(unsigned char)p] = makeInvertedPixbuf(app.pieceImages[(unsigned char)p]);
+        }
     }
     app.pieceImagesLoaded = true;
 }
@@ -1237,7 +1320,8 @@ static bool haveAllPieceImages() {
 static bool drawPieceImage(cairo_t* cr, char p, double x, double y, double cell) {
     if (!app.usePieceImages) return false;
     if (!app.pieceImagesLoaded) loadPieceImages();
-    GdkPixbuf* pix = app.pieceImages[(unsigned char)p];
+    GdkPixbuf* pix = shouldInvertPieceImages() ? app.pieceImagesInverted[(unsigned char)p] : app.pieceImages[(unsigned char)p];
+    if (!pix) pix = app.pieceImages[(unsigned char)p];
     if (!pix) return false;
     int pw = gdk_pixbuf_get_width(pix);
     int ph = gdk_pixbuf_get_height(pix);
@@ -1349,7 +1433,7 @@ static Layout computeLayout(GtkWidget* widget) {
     // If there is no side panel, captured pieces live below the board.  Reserve
     // explicit vertical space for them so large UI fonts do not cause that area
     // to be clipped away by the board/status region.
-    L.capturedH = L.hasPanel ? 0 : std::max(94, std::min(150, app.uiFontSize * 2 + 38));
+    L.capturedH = L.hasPanel ? 0 : std::max(148, std::min(240, app.uiFontSize * 3 + 62));
 
     int availableH = L.H - L.topH - L.statusH - 2 * L.margin - L.capturedH;
     if (availableH < 240) availableH = L.H - L.topH - L.statusH - 2 * L.margin;
@@ -1430,45 +1514,76 @@ static void drawToolbar(cairo_t* cr, int W) {
     }
 }
 
-static void drawCapturedRow(cairo_t* cr, const std::string& label, const std::vector<char>& pieces, int x, int y, int w, int cell) {
-    int fs = std::max(12, std::min(22, app.uiFontSize - 6));
-    drawTextLeft(cr, label, x, y + fs + 2, fs, true);
-    int px = x + std::max(112, fs * 7);
+static int capturedLabelWidth() {
+    return std::max(190, std::min(310, app.uiFontSize * 6));
+}
+
+static int fitCapturedCell(int availableW, int requestedCell, int maxPieces) {
+    if (maxPieces <= 0) return requestedCell;
+    int labelW = capturedLabelWidth();
+    int usable = std::max(40, availableW - labelW - 18);
+    int fit = (usable - std::max(0, maxPieces - 1) * 3) / maxPieces;
+    return clampInt(std::min(requestedCell, fit), 20, requestedCell);
+}
+
+static void drawCapturedRow(cairo_t* cr, const std::string& label, const std::vector<char>& pieces, int x, int y, int w, int cell, int fs) {
+    drawTextLeft(cr, label, x, y + fs + 3, fs, true);
+    int px = x + capturedLabelWidth();
     int py = y;
-    int maxX = x + w - cell;
+    int maxX = x + w - cell - 4;
     for (char p : pieces) {
         if (px > maxX) break;
         if (!drawPieceImage(cr, p, px, py, cell)) {
-            drawTextCentered(cr, pieceLetter(p), px, py, cell, cell, fs + 2, true);
+            drawTextCentered(cr, pieceLetter(p), px, py, cell, cell, fs + 3, true);
         }
-        px += cell + 2;
+        px += cell + 3;
     }
-    if (pieces.empty()) drawTextLeft(cr, "None", px, y + fs + 2, fs, false);
+    if (pieces.empty()) drawTextLeft(cr, "None", px, y + fs + 3, fs, false);
+}
+
+static void drawCapturedBox(cairo_t* cr, int x, int y, int w, int h) {
+    cairo_set_source_rgb(cr, 0.78, 0.78, 0.74);
+    cairo_rectangle(cr, x, y, w, h);
+    cairo_fill_preserve(cr);
+    cairo_set_source_rgb(cr, 0.0, 0.0, 0.0);
+    cairo_set_line_width(cr, 2.0);
+    cairo_stroke(cr);
 }
 
 static void drawCapturedPieces(cairo_t* cr, const Layout& L) {
     auto caps = app.game.capturedPieces();
-    int cell = std::max(20, std::min(34, app.uiFontSize + 8));
+    int baseCell = std::max(32, std::min(58, app.uiFontSize + 14));
+    int fs = std::max(22, std::min(38, app.uiFontSize - 2));
+    int maxPieces = std::max((int)caps.first.size(), (int)caps.second.size());
     if (L.hasPanel) {
-        int y = L.panelY + L.panelH - cell * 2 - 38;
+        int boxH = std::max(152, std::min(220, baseCell * 2 + fs + 42));
+        int y = L.panelY + L.panelH - boxH - 8;
         if (y < L.panelY + 86) return;
+        int cell = fitCapturedCell(L.panelW - 24, baseCell, maxPieces);
+        int rowGap = 10;
+        drawCapturedBox(cr, L.panelX + 4, y, L.panelW - 8, boxH);
         cairo_set_source_rgb(cr, 0.0, 0.0, 0.0);
-        drawTextCentered(cr, "Captured", L.panelX, y - 30, L.panelW, 26, std::max(13, std::min(22, app.uiFontSize - 5)), true);
-        drawCapturedRow(cr, "White:", caps.first, L.panelX + 10, y, L.panelW - 20, cell);
-        drawCapturedRow(cr, "Black:", caps.second, L.panelX + 10, y + cell + 12, L.panelW - 20, cell);
+        drawTextCentered(cr, "Captured", L.panelX + 8, y + 8, L.panelW - 16, fs + 8, fs, true);
+        int rowY = y + fs + 24;
+        drawCapturedRow(cr, "White:", caps.first, L.panelX + 14, rowY, L.panelW - 28, cell, fs);
+        drawCapturedRow(cr, "Black:", caps.second, L.panelX + 14, rowY + cell + rowGap, L.panelW - 28, cell, fs);
     } else {
         int areaTop = L.boardY + L.board + 8;
         int areaBottom = L.H - L.statusH - 8;
         int available = areaBottom - areaTop;
-        if (available <= 38) return;
+        if (available <= 70) return;
 
-        int rowGap = 8;
-        int fittedCell = std::min(cell, std::max(16, (available - rowGap) / 2));
-        int y = areaTop + std::max(0, (available - (fittedCell * 2 + rowGap)) / 2);
+        int rowGap = 10;
+        int cell = std::min(baseCell, std::max(22, (available - fs - rowGap - 32) / 2));
+        cell = fitCapturedCell(L.board - 24, cell, maxPieces);
+        int boxH = std::min(available, std::max(132, fs + cell * 2 + rowGap + 34));
+        int boxY = areaTop + std::max(0, (available - boxH) / 2);
 
+        drawCapturedBox(cr, L.boardX, boxY, L.board, boxH);
         cairo_set_source_rgb(cr, 0.0, 0.0, 0.0);
-        drawCapturedRow(cr, "White captured:", caps.first, L.boardX, y, L.board, fittedCell);
-        drawCapturedRow(cr, "Black captured:", caps.second, L.boardX, y + fittedCell + rowGap, L.board, fittedCell);
+        int y = boxY + fs + 12;
+        drawCapturedRow(cr, "White captured:", caps.first, L.boardX + 12, y, L.board - 24, cell, fs);
+        drawCapturedRow(cr, "Black captured:", caps.second, L.boardX + 12, y + cell + rowGap, L.board - 24, cell, fs);
     }
 }
 
@@ -1482,7 +1597,7 @@ static void drawMovePanel(cairo_t* cr, const Layout& L) {
     cairo_stroke(cr);
     drawTextCentered(cr, "Moves", L.panelX, L.panelY + 6, L.panelW, 30, std::max(16, std::min(26, app.uiFontSize - 2)), true);
     int lineH = std::max(20, std::min(34, app.uiFontSize + 4));
-    int capturedReserve = std::max(124, std::min(178, app.uiFontSize * 2 + 72));
+    int capturedReserve = std::max(170, std::min(250, app.uiFontSize * 3 + 100));
     int maxLines = std::max(1, (L.panelH - 48 - capturedReserve) / lineH);
     auto lines = moveHistoryLines(maxLines);
     int y = L.panelY + 48;
@@ -1533,16 +1648,17 @@ static void drawConfirmNew(cairo_t* cr, const Layout& L) {
 
 static void drawSettingsMain(cairo_t* cr, const Layout& L, double ox, double oy, double ow, double oh) {
     bool locked = gameSetupLocked();
-    drawTextCentered(cr, "Settings", ox, oy + 14, ow, 44, std::min(34, app.uiFontSize + 4), true);
+    int sfs = settingsFontSize();
+    drawTextCentered(cr, "Settings", ox, oy + 12, ow, std::max(56, sfs + 14), sfs + 6, true);
     drawTextCentered(cr, locked ? "Engine side and Elo are locked after the first move." : "Set engine side and Elo before making the first move.",
-                     ox + 22, oy + 58, ow - 44, 30, std::max(12, std::min(20, app.uiFontSize - 8)), false);
+                     ox + 22, oy + 70, ow - 44, std::max(38, sfs - 8), std::max(22, sfs - 18), false);
 
     int bw = (int)((ow - 96) / 2.0);
-    int bh = 50;
+    int bh = std::max(66, std::min(88, sfs + 22));
     int left = (int)(ox + 42);
     int right = left + bw + 12;
-    int y = (int)(oy + 100);
-    int gap = 60;
+    int y = (int)(oy + 118);
+    int gap = bh + 10;
 
     std::string engineLabel = std::string(locked ? "Engine Locked: " : "Engine: ");
     if (app.engineMode == EngineMode::Off) engineLabel += "Off";
@@ -1552,7 +1668,7 @@ static void drawSettingsMain(cairo_t* cr, const Layout& L, double ox, double oy,
     RectButton engine{engineLabel, left, y, bw * 2 + 12, bh}; y += gap;
     RectButton eloDown{"Elo -250", left, y, bw, bh};
     RectButton eloUp{"Elo +250", right, y, bw, bh}; y += gap;
-    RectButton eloValue{"Elo: " + std::to_string(currentEngineElo()), left, y, bw * 2 + 12, bh}; y += gap + 4;
+    RectButton eloValue{"Elo: " + std::to_string(currentEngineElo()), left, y, bw * 2 + 12, bh}; y += gap;
 
     RectButton hint{"Hint", left, y, bw, bh};
     RectButton restart{"Restart Engine", right, y, bw, bh}; y += gap;
@@ -1567,28 +1683,30 @@ static void drawSettingsMain(cairo_t* cr, const Layout& L, double ox, double oy,
     RectButton bigger{"A+", right, y, bw, bh}; y += gap;
     RectButton pieceMode{std::string("Piece PNGs: ") + (app.usePieceImages ? "On" : "Off"), left, y, bw, bh};
     RectButton reloadPieces{"Reload PNGs", right, y, bw, bh}; y += gap;
+    RectButton darkFix{std::string("Dark Piece Fix: ") + darkPieceModeLabel(), left, y, bw * 2 + 12, bh}; y += gap;
     RectButton close{"Close Settings", left, y, bw * 2 + 12, bh};
 
     app.overlayButtons = {engine, eloDown, eloUp, eloValue, hint, restart, exportBtn, confirm, saves, review,
-                          coords, moves, smaller, bigger, pieceMode, reloadPieces, close};
-    double fs = std::max(13, std::min(23, app.uiFontSize - 4));
+                          coords, moves, smaller, bigger, pieceMode, reloadPieces, darkFix, close};
+    double fs = sfs;
     for (const auto& b : app.overlayButtons) drawButton(cr, b, fs);
 }
 
 static void drawSaveLoadSettings(cairo_t* cr, const Layout& L, double ox, double oy, double ow, double oh) {
-    drawTextCentered(cr, "Save / Load Games", ox, oy + 14, ow, 44, std::min(34, app.uiFontSize + 4), true);
-    drawTextCentered(cr, "Five local save slots. Loading replaces the current board.", ox + 20, oy + 58, ow - 40, 30, std::max(12, std::min(20, app.uiFontSize - 8)), false);
+    int sfs = settingsFontSize();
+    drawTextCentered(cr, "Save / Load Games", ox, oy + 12, ow, std::max(56, sfs + 14), sfs + 4, true);
+    drawTextCentered(cr, "Five local save slots. Loading replaces the current board.", ox + 20, oy + 72, ow - 40, std::max(38, sfs - 8), std::max(22, sfs - 18), false);
 
     int left = (int)(ox + 30);
-    int y = (int)(oy + 102);
-    int rowH = 76;
-    int summaryW = (int)(ow - 260);
-    int smallW = 70;
-    int bh = 42;
+    int y = (int)(oy + 126);
+    int rowH = std::max(92, sfs + 48);
+    int smallW = std::max(88, std::min(120, sfs * 2));
+    int summaryW = (int)(ow - 70 - (smallW * 3 + 24));
+    int bh = std::max(62, std::min(82, sfs + 20));
     app.overlayButtons.clear();
-    double fs = std::max(12, std::min(20, app.uiFontSize - 6));
+    double fs = std::max(24, std::min(48, sfs - 8));
     for (int i = 1; i <= 5; ++i) {
-        drawTextLeft(cr, slotSummary(i), left, y + 28, fs, false);
+        drawTextLeft(cr, slotSummary(i), left, y + std::max(38, bh - 12), fs, false);
         RectButton save{"Save " + std::to_string(i), left + summaryW, y, smallW, bh};
         RectButton load{"Load " + std::to_string(i), left + summaryW + smallW + 8, y, smallW, bh};
         RectButton del{"Del " + std::to_string(i), left + summaryW + (smallW + 8) * 2, y, smallW, bh};
@@ -1596,17 +1714,17 @@ static void drawSaveLoadSettings(cairo_t* cr, const Layout& L, double ox, double
         drawButton(cr, save, fs); drawButton(cr, load, fs); drawButton(cr, del, fs);
         y += rowH;
     }
-    RectButton back{"Back", left, (int)(oy + oh - 66), 160, 50};
-    RectButton close{"Close Settings", left + 180, (int)(oy + oh - 66), 240, 50};
+    RectButton back{"Back", left, (int)(oy + oh - 78), 190, 62};
+    RectButton close{"Close Settings", left + 210, (int)(oy + oh - 78), 320, 62};
     app.overlayButtons.push_back(back); app.overlayButtons.push_back(close);
-    drawButton(cr, back, std::max(13, std::min(22, app.uiFontSize - 4)));
-    drawButton(cr, close, std::max(13, std::min(22, app.uiFontSize - 4)));
+    drawButton(cr, back, fs);
+    drawButton(cr, close, fs);
 }
 
 static void drawSettings(cairo_t* cr, const Layout& L) {
     app.overlayButtons.clear();
-    double ow = std::min((double)L.W * 0.92, 880.0);
-    double oh = std::min((double)L.H * 0.84, 820.0);
+    double ow = std::min((double)L.W * 0.96, 1040.0);
+    double oh = std::min((double)L.H * 0.94, 1180.0);
     double ox = (L.W - ow) / 2.0;
     double oy = (L.H - oh) / 2.0;
     cairo_set_source_rgb(cr, 0.94, 0.94, 0.90);
@@ -1776,7 +1894,9 @@ static gboolean on_draw(GtkWidget* widget, GdkEventExpose*, gpointer) {
                     double cx = L.boardX + vf * L.cell + L.cell / 2.0;
                     double cy = L.boardY + vr * L.cell + L.cell / 2.0;
                     double rad = L.cell * 0.36;
-                    if (is_white_piece(p)) {
+                    bool drawAsWhite = is_white_piece(p);
+                    if (shouldInvertPieceImages()) drawAsWhite = !drawAsWhite;
+                    if (drawAsWhite) {
                         cairo_set_source_rgb(cr, 0.96, 0.96, 0.92);
                         cairo_arc(cr, cx, cy, rad, 0, 6.28318);
                         cairo_fill_preserve(cr);
@@ -2084,6 +2204,10 @@ static bool handleSettingsTap(int x, int y) {
             app.hintFrom = app.hintTo = -1;
             app.uiStatus = "Review mode.";
         } else if (b.label.rfind("Piece PNGs", 0) == 0) app.usePieceImages = !app.usePieceImages;
+        else if (b.label.rfind("Dark Piece Fix", 0) == 0) {
+            app.darkPieceMode = (app.darkPieceMode + 1) % 3;
+            app.uiStatus = std::string("Dark Piece Fix: ") + darkPieceModeLabel();
+        }
         else if (b.label == "Reload PNGs") {
             freePieceImages();
             loadPieceImages();
