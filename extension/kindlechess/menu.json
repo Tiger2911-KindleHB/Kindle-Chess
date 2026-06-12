@@ -1,0 +1,9 @@
+{
+  "items": [
+    {
+      "name": "KindleChess",
+      "priority": 1,
+      "action": "bin/start.sh"
+    }
+  ]
+}
