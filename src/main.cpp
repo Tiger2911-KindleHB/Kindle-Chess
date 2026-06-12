@@ -243,6 +243,26 @@ public:
         return any;
     }
 
+    bool isCheckmate() const {
+        auto moves = legalMoves();
+        if (!moves.empty()) return false;
+        int k = kingSquare(pos.white_to_move);
+        return k >= 0 && isSquareAttacked(k, !pos.white_to_move);
+    }
+
+    bool isStalemate() const {
+        auto moves = legalMoves();
+        if (!moves.empty()) return false;
+        int k = kingSquare(pos.white_to_move);
+        return k >= 0 && !isSquareAttacked(k, !pos.white_to_move);
+    }
+
+    std::string gameOverMessage() const {
+        if (isCheckmate()) return std::string(pos.white_to_move ? "Black" : "White") + " has won by checkmate.";
+        if (isStalemate()) return "Draw by stalemate.";
+        return "";
+    }
+
 private:
     Position pos;
     std::vector<Position> history;
@@ -525,8 +545,9 @@ public:
         return true;
     }
 
-    std::string bestMove(const std::string& path, const std::vector<std::string>& moves, int movetimeMs, std::string& err) {
+    std::string bestMove(const std::string& path, const std::vector<std::string>& moves, int movetimeMs, int targetElo, std::string& err) {
         if (!ensureStarted(path, err)) return "";
+        configureStrength(targetElo);
         std::ostringstream poscmd;
         poscmd << "position startpos";
         if (!moves.empty()) {
@@ -577,6 +598,17 @@ private:
     int write_fd = -1;
     int read_fd = -1;
     std::string partial;
+
+    void configureStrength(int targetElo) {
+        int elo = std::max(250, std::min(3000, targetElo));
+        int skill = std::max(0, std::min(20, (elo - 250) * 20 / 2750));
+        int uciElo = std::max(1320, std::min(3190, elo));
+        sendLine("setoption name Skill Level value " + std::to_string(skill));
+        sendLine("setoption name UCI_LimitStrength value true");
+        sendLine("setoption name UCI_Elo value " + std::to_string(uciElo));
+        sendLine("isready");
+        waitForToken("readyok", 5000);
+    }
 
     static long nowMs() {
         struct timeval tv{};
@@ -657,14 +689,16 @@ struct App {
     int selected = -1;
     bool flipped = false;
     EngineMode engineMode = EngineMode::Off;
-    int levelIndex = 1;
-    std::vector<int> movetimes{250, 750, 1500, 3000};
+    int engineEloIndex = 5;
+    std::vector<int> engineElos{250, 500, 750, 1000, 1250, 1500, 1750, 2000, 2250, 2500, 2750, 3000};
     std::string uiStatus;
     int pendingFrom = -1;
     int pendingTo = -1;
 
     bool showSettings = false;
     bool confirmNew = false;
+    bool showGameOver = false;
+    std::string gameOverText;
     bool resigned = false;
     std::string resignedMessage;
 
@@ -676,7 +710,6 @@ struct App {
     std::array<GdkPixbuf*, 128> pieceImages{};
 
     std::vector<RectButton> overlayButtons;
-    int sliderX = 0, sliderY = 0, sliderW = 0, sliderH = 0;
 };
 
 static App app;
@@ -698,7 +731,9 @@ static void saveAppSettings() {
     f << "ui_font_size=" << app.uiFontSize << "\n";
     f << "show_coordinates=" << (app.showCoordinates ? 1 : 0) << "\n";
     f << "show_move_list=" << (app.showMoveList ? 1 : 0) << "\n";
-    f << "flipped=" << (app.flipped ? 1 : 0) << "\n";
+    f << "engine_mode=" << (app.engineMode == EngineMode::Off ? 0 : (app.engineMode == EngineMode::Black ? 1 : 2)) << "\n";
+    f << "engine_elo=" << app.engineElos[app.engineEloIndex] << "\n";
+    f << "flipped=0\n";
     f << "use_piece_images=" << (app.usePieceImages ? 1 : 0) << "\n";
 }
 
@@ -712,10 +747,17 @@ static void loadAppSettings() {
         std::string key = line.substr(0, eq);
         std::string val = line.substr(eq + 1);
         int n = std::atoi(val.c_str());
-        if (key == "ui_font_size") app.uiFontSize = clampInt(n, 14, 34);
+        if (key == "ui_font_size") app.uiFontSize = clampInt(n, 14, 50);
         else if (key == "show_coordinates") app.showCoordinates = n != 0;
         else if (key == "show_move_list") app.showMoveList = n != 0;
-        else if (key == "flipped") app.flipped = n != 0;
+        else if (key == "engine_mode") app.engineMode = (n == 1 ? EngineMode::Black : (n == 2 ? EngineMode::White : EngineMode::Off));
+        else if (key == "engine_elo") {
+            int best = 0;
+            for (int i = 1; i < (int)app.engineElos.size(); ++i)
+                if (std::abs(app.engineElos[i] - n) < std::abs(app.engineElos[best] - n)) best = i;
+            app.engineEloIndex = best;
+        }
+        else if (key == "flipped") app.flipped = false;
         else if (key == "use_piece_images") app.usePieceImages = n != 0;
     }
 }
@@ -738,6 +780,34 @@ static std::string engineModeLabel() {
     if (app.engineMode == EngineMode::Off) return "Engine: Off";
     if (app.engineMode == EngineMode::Black) return "Engine: Black";
     return "Engine: White";
+}
+
+static int currentEngineElo() {
+    return app.engineElos[clampInt(app.engineEloIndex, 0, (int)app.engineElos.size() - 1)];
+}
+
+static int engineMovetimeForElo(int elo) {
+    // The user sees Elo, not milliseconds. Internally this bounds Stockfish thinking time
+    // so the Kindle remains responsive and battery-friendly.
+    return clampInt(elo, 250, 3000);
+}
+
+static bool gameSetupLocked() {
+    return !app.game.uciMoves().empty();
+}
+
+static bool updateGameOverPopup() {
+    std::string msg = app.game.gameOverMessage();
+    if (!msg.empty()) {
+        app.showGameOver = true;
+        app.gameOverText = msg;
+        app.selected = -1;
+        app.pendingFrom = app.pendingTo = -1;
+        return true;
+    }
+    app.showGameOver = false;
+    app.gameOverText.clear();
+    return false;
 }
 
 
@@ -870,13 +940,13 @@ static void drawTextLeft(cairo_t* cr, const std::string& text, double x, double 
 }
 
 static std::vector<std::string> toolbarLabels() {
-    return {"New", "Undo", "Flip", "Resign", "Settings", engineModeLabel(), "Level: " + std::to_string(app.movetimes[app.levelIndex]) + "ms", "Exit"};
+    return {"New", "Undo", "Settings", "Exit"};
 }
 
 static int buttonWidthFor(const std::string& label) {
     int base = 46 + (int)label.size() * std::max(8, app.uiFontSize / 2);
     if (label.rfind("Engine", 0) == 0) base += 22;
-    if (label.rfind("Level", 0) == 0) base += 12;
+    if (label.rfind("Elo", 0) == 0) base += 18;
     return clampInt(base, 78, 190);
 }
 
@@ -942,6 +1012,7 @@ static std::string moveSummaryLine() {
     os << "Move " << (moves.size() / 2 + 1);
     if (!moves.empty()) os << "  Last: " << moves.back();
     os << "  " << engineModeLabel();
+    if (app.engineMode != EngineMode::Off) os << "  Elo: " << currentEngineElo();
     return os.str();
 }
 
@@ -1054,8 +1125,8 @@ static void drawConfirmNew(cairo_t* cr, const Layout& L) {
 
 static void drawSettings(cairo_t* cr, const Layout& L) {
     app.overlayButtons.clear();
-    double ow = std::min((double)L.W * 0.88, 760.0);
-    double oh = std::min((double)L.H * 0.70, 650.0);
+    double ow = std::min((double)L.W * 0.90, 820.0);
+    double oh = std::min((double)L.H * 0.76, 720.0);
     double ox = (L.W - ow) / 2.0;
     double oy = (L.H - oh) / 2.0;
     cairo_set_source_rgb(cr, 0.94, 0.94, 0.90);
@@ -1065,42 +1136,61 @@ static void drawSettings(cairo_t* cr, const Layout& L) {
     cairo_set_line_width(cr, 4.0);
     cairo_stroke(cr);
 
-    drawTextCentered(cr, "Settings", ox, oy + 16, ow, 44, app.uiFontSize + 4, true);
-    drawTextLeft(cr, "UI font size", ox + 42, oy + 100, std::max(16, app.uiFontSize - 2), true);
-    drawTextLeft(cr, std::to_string(app.uiFontSize), ox + ow - 82, oy + 100, std::max(16, app.uiFontSize - 2), true);
-
-    app.sliderX = (int)(ox + 42);
-    app.sliderY = (int)(oy + 126);
-    app.sliderW = (int)(ow - 84);
-    app.sliderH = 48;
-    cairo_set_source_rgb(cr, 0,0,0);
-    cairo_set_line_width(cr, 4.0);
-    cairo_move_to(cr, app.sliderX, app.sliderY + app.sliderH / 2.0);
-    cairo_line_to(cr, app.sliderX + app.sliderW, app.sliderY + app.sliderH / 2.0);
-    cairo_stroke(cr);
-    double t = (app.uiFontSize - 14) / 20.0;
-    double kx = app.sliderX + t * app.sliderW;
-    cairo_arc(cr, kx, app.sliderY + app.sliderH / 2.0, 15, 0, 6.28318);
-    cairo_fill(cr);
-    drawTextCentered(cr, "Tap the line to resize all main UI text.", ox + 42, oy + 174, ow - 84, 28, std::max(13, app.uiFontSize - 7), false);
+    bool locked = gameSetupLocked();
+    drawTextCentered(cr, "Settings", ox, oy + 14, ow, 44, app.uiFontSize + 4, true);
+    drawTextCentered(cr, locked ? "Engine side and Elo are locked after the first move." : "Set engine side and Elo before making the first move.",
+                     ox + 22, oy + 62, ow - 44, 32, std::max(13, app.uiFontSize - 7), false);
 
     int bw = (int)((ow - 96) / 2.0);
     int bh = 56;
     int left = (int)(ox + 42);
     int right = left + bw + 12;
-    int y1 = (int)(oy + 230);
-    RectButton coords{std::string("Coordinates: ") + (app.showCoordinates ? "On" : "Off"), left, y1, bw, bh};
-    RectButton moves{std::string("Move List: ") + (app.showMoveList ? "On" : "Off"), right, y1, bw, bh};
-    RectButton smaller{"A-", left, y1 + 78, bw, bh};
-    RectButton bigger{"A+", right, y1 + 78, bw, bh};
-    RectButton pieceMode{std::string("Piece PNGs: ") + (app.usePieceImages ? "On" : "Off"), left, y1 + 156, bw, bh};
-    RectButton reloadPieces{"Reload PNGs", right, y1 + 156, bw, bh};
-    RectButton close{"Close Settings", left, y1 + 234, bw * 2 + 12, bh};
+    int y1 = (int)(oy + 112);
+
+    std::string engineLabel = std::string(locked ? "Engine Locked: " : "Engine: ");
+    if (app.engineMode == EngineMode::Off) engineLabel += "Off";
+    else if (app.engineMode == EngineMode::Black) engineLabel += "Black";
+    else engineLabel += "White";
+
+    RectButton engine{engineLabel, left, y1, bw * 2 + 12, bh};
+    RectButton eloDown{"Elo -250", left, y1 + 78, bw, bh};
+    RectButton eloUp{"Elo +250", right, y1 + 78, bw, bh};
+    RectButton eloValue{"Elo: " + std::to_string(currentEngineElo()), left, y1 + 156, bw * 2 + 12, bh};
+
+    RectButton coords{std::string("Coordinates: ") + (app.showCoordinates ? "On" : "Off"), left, y1 + 244, bw, bh};
+    RectButton moves{std::string("Move List: ") + (app.showMoveList ? "On" : "Off"), right, y1 + 244, bw, bh};
+    RectButton smaller{"A-", left, y1 + 322, bw, bh};
+    RectButton bigger{"A+", right, y1 + 322, bw, bh};
+    RectButton pieceMode{std::string("Piece PNGs: ") + (app.usePieceImages ? "On" : "Off"), left, y1 + 400, bw, bh};
+    RectButton reloadPieces{"Reload PNGs", right, y1 + 400, bw, bh};
+    RectButton close{"Close Settings", left, y1 + 478, bw * 2 + 12, bh};
+
+    app.overlayButtons.push_back(engine);
+    app.overlayButtons.push_back(eloDown); app.overlayButtons.push_back(eloUp); app.overlayButtons.push_back(eloValue);
     app.overlayButtons.push_back(coords); app.overlayButtons.push_back(moves);
     app.overlayButtons.push_back(smaller); app.overlayButtons.push_back(bigger);
     app.overlayButtons.push_back(pieceMode); app.overlayButtons.push_back(reloadPieces);
     app.overlayButtons.push_back(close);
+
     for (const auto& b : app.overlayButtons) drawButton(cr, b, std::max(15, app.uiFontSize - 3));
+}
+
+static void drawGameOver(cairo_t* cr, const Layout& L) {
+    app.overlayButtons.clear();
+    double ow = std::min((double)L.W * 0.84, 650.0);
+    double oh = 250;
+    double ox = (L.W - ow) / 2.0;
+    double oy = (L.H - oh) / 2.0;
+    cairo_set_source_rgb(cr, 0.94, 0.94, 0.90);
+    cairo_rectangle(cr, ox, oy, ow, oh);
+    cairo_fill_preserve(cr);
+    cairo_set_source_rgb(cr, 0,0,0);
+    cairo_set_line_width(cr, 4.0);
+    cairo_stroke(cr);
+    drawTextCentered(cr, app.gameOverText.empty() ? "Game Over" : app.gameOverText, ox + 20, oy + 28, ow - 40, 76, app.uiFontSize + 5, true);
+    RectButton yes{"New Game", (int)(ox + ow/2 - 105), (int)(oy + oh - 82), 210, 58};
+    app.overlayButtons.push_back(yes);
+    drawButton(cr, yes, std::max(17, app.uiFontSize - 1));
 }
 
 static gboolean on_draw(GtkWidget* widget, GdkEventExpose*, gpointer) {
@@ -1194,7 +1284,7 @@ static gboolean on_draw(GtkWidget* widget, GdkEventExpose*, gpointer) {
 
     drawMovePanel(cr, L);
 
-    std::string status = app.resigned ? app.resignedMessage : (app.uiStatus.empty() ? app.game.status() : app.uiStatus);
+    std::string status = app.uiStatus.empty() ? app.game.status() : app.uiStatus;
     cairo_set_source_rgb(cr, 0.0, 0.0, 0.0);
     drawTextCentered(cr, status, L.margin, H - L.statusH + 6, W - 2 * L.margin, L.statusH * 0.58, app.uiFontSize + 2, true);
     drawTextCentered(cr, moveSummaryLine(), L.margin, H - L.statusH + L.statusH * 0.58, W - 2 * L.margin, L.statusH * 0.36, std::max(12, app.uiFontSize - 7), false);
@@ -1223,7 +1313,8 @@ static gboolean on_draw(GtkWidget* widget, GdkEventExpose*, gpointer) {
         }
     }
 
-    if (app.confirmNew) drawConfirmNew(cr, L);
+    if (app.showGameOver) drawGameOver(cr, L);
+    else if (app.confirmNew) drawConfirmNew(cr, L);
     else if (app.showSettings) drawSettings(cr, L);
 
     cairo_destroy(cr);
@@ -1239,11 +1330,12 @@ static void maybeEngineMove() {
     if (!engineShouldMove()) return;
     auto legal = app.game.legalMoves();
     if (legal.empty()) return;
-    int mt = app.movetimes[app.levelIndex];
-    app.uiStatus = "Engine thinking...";
+    int elo = currentEngineElo();
+    int mt = engineMovetimeForElo(elo);
+    app.uiStatus = "Engine thinking at Elo " + std::to_string(elo) + "...";
     flush_gui();
     std::string err;
-    std::string mv = app.engine.bestMove(engine_path(), app.game.uciMoves(), mt, err);
+    std::string mv = app.engine.bestMove(engine_path(), app.game.uciMoves(), mt, elo, err);
     app.uiStatus.clear();
     if (mv.empty()) {
         app.uiStatus = err.empty() ? "Engine produced no move." : err;
@@ -1251,6 +1343,7 @@ static void maybeEngineMove() {
         app.uiStatus = "Engine sent illegal move: " + mv;
     } else {
         app.game.save();
+        updateGameOverPopup();
     }
     if (app.area) gtk_widget_queue_draw(app.area);
 }
@@ -1281,11 +1374,13 @@ static bool handlePromotionTap(GtkWidget* widget, int x, int y) {
         if (x >= bx && x <= bx + bw && y >= by && y <= by + bh) {
             app.resigned = false;
             app.resignedMessage.clear();
+            app.showGameOver = false;
+            app.gameOverText.clear();
             app.game.makeMove(app.pendingFrom, app.pendingTo, promos[i]);
             app.game.save();
             app.pendingFrom = app.pendingTo = -1;
             app.selected = -1;
-            maybeEngineMove();
+            if (!updateGameOverPopup()) maybeEngineMove();
             gtk_widget_queue_draw(app.area);
             return true;
         }
@@ -1301,12 +1396,15 @@ static void startNewGameNow() {
     app.uiStatus.clear();
     app.resigned = false;
     app.resignedMessage.clear();
+    app.showGameOver = false;
+    app.gameOverText.clear();
     app.confirmNew = false;
     app.showSettings = false;
     app.game.reset();
     app.selected = -1;
     app.pendingFrom = app.pendingTo = -1;
     app.game.save();
+    maybeEngineMove();
 }
 
 static bool handleConfirmTap(int x, int y) {
@@ -1321,28 +1419,35 @@ static bool handleConfirmTap(int x, int y) {
     return true;
 }
 
-static void setFontFromSliderX(int x) {
-    int rel = clampInt(x - app.sliderX, 0, app.sliderW);
-    double t = app.sliderW > 0 ? (double)rel / (double)app.sliderW : 0.5;
-    app.uiFontSize = clampInt((int)(14 + t * 20 + 0.5), 14, 34);
-    saveAppSettings();
+static bool handleGameOverTap(int x, int y) {
+    if (!app.showGameOver) return false;
+    for (const auto& b : app.overlayButtons) {
+        if (!pointInButton(b, x, y)) continue;
+        if (b.label == "New Game") startNewGameNow();
+        gtk_widget_queue_draw(app.area);
+        return true;
+    }
+    return true;
 }
 
 static bool handleSettingsTap(int x, int y) {
     if (!app.showSettings) return false;
-    if (x >= app.sliderX - 12 && x <= app.sliderX + app.sliderW + 12 &&
-        y >= app.sliderY - 8 && y <= app.sliderY + app.sliderH + 8) {
-        setFontFromSliderX(x);
-        gtk_widget_queue_draw(app.area);
-        return true;
-    }
     for (const auto& b : app.overlayButtons) {
         if (!pointInButton(b, x, y)) continue;
+        bool locked = gameSetupLocked();
         if (b.label.rfind("Coordinates", 0) == 0) app.showCoordinates = !app.showCoordinates;
         else if (b.label.rfind("Move List", 0) == 0) app.showMoveList = !app.showMoveList;
-        else if (b.label == "A-") app.uiFontSize = clampInt(app.uiFontSize - 2, 14, 34);
-        else if (b.label == "A+") app.uiFontSize = clampInt(app.uiFontSize + 2, 14, 34);
-        else if (b.label.rfind("Piece PNGs", 0) == 0) app.usePieceImages = !app.usePieceImages;
+        else if (b.label == "A-") app.uiFontSize = clampInt(app.uiFontSize - 2, 14, 50);
+        else if (b.label == "A+") app.uiFontSize = clampInt(app.uiFontSize + 2, 14, 50);
+        else if (b.label.rfind("Engine", 0) == 0 && !locked) {
+            if (app.engineMode == EngineMode::Off) app.engineMode = EngineMode::Black;
+            else if (app.engineMode == EngineMode::Black) app.engineMode = EngineMode::White;
+            else app.engineMode = EngineMode::Off;
+        } else if (b.label == "Elo -250" && !locked) {
+            app.engineEloIndex = clampInt(app.engineEloIndex - 1, 0, (int)app.engineElos.size() - 1);
+        } else if (b.label == "Elo +250" && !locked) {
+            app.engineEloIndex = clampInt(app.engineEloIndex + 1, 0, (int)app.engineElos.size() - 1);
+        } else if (b.label.rfind("Piece PNGs", 0) == 0) app.usePieceImages = !app.usePieceImages;
         else if (b.label == "Reload PNGs") {
             freePieceImages();
             loadPieceImages();
@@ -1357,35 +1462,23 @@ static bool handleSettingsTap(int x, int y) {
 
 static void clickButton(const std::string& label) {
     app.uiStatus.clear();
-    bool runEngineAfter = false;
     if (label == "New") {
         app.confirmNew = true;
         app.showSettings = false;
+        app.showGameOver = false;
         app.overlayButtons.clear();
     } else if (label == "Undo") {
         app.resigned = false;
         app.resignedMessage.clear();
+        app.showGameOver = false;
+        app.gameOverText.clear();
         app.game.undo(); app.game.save(); app.selected = -1;
         if (engineShouldMove()) { app.game.undo(); app.game.save(); }
-    } else if (label == "Flip") {
-        app.flipped = !app.flipped;
-        saveAppSettings();
-    } else if (label == "Resign") {
-        app.resigned = true;
-        app.resignedMessage = std::string(app.game.whiteToMove() ? "White" : "Black") + " resigned.";
-        app.selected = -1;
-        app.pendingFrom = app.pendingTo = -1;
     } else if (label == "Settings") {
         app.showSettings = true;
         app.confirmNew = false;
+        app.showGameOver = false;
         app.overlayButtons.clear();
-    } else if (label.rfind("Engine", 0) == 0) {
-        if (app.engineMode == EngineMode::Off) app.engineMode = EngineMode::Black;
-        else if (app.engineMode == EngineMode::Black) app.engineMode = EngineMode::White;
-        else app.engineMode = EngineMode::Off;
-        runEngineAfter = true;
-    } else if (label.rfind("Level", 0) == 0) {
-        app.levelIndex = (app.levelIndex + 1) % (int)app.movetimes.size();
     } else if (label == "Exit") {
         app.game.save();
         saveAppSettings();
@@ -1395,13 +1488,13 @@ static void clickButton(const std::string& label) {
         return;
     }
     gtk_widget_queue_draw(app.area);
-    if (runEngineAfter) maybeEngineMove();
 }
 
 static gboolean on_button(GtkWidget* widget, GdkEventButton* ev, gpointer) {
     if (ev->button != 1) return FALSE;
     int x = (int)ev->x, y = (int)ev->y;
 
+    if (handleGameOverTap(x, y)) return TRUE;
     if (handleConfirmTap(x, y)) return TRUE;
     if (handleSettingsTap(x, y)) return TRUE;
     if (handlePromotionTap(widget, x, y)) return TRUE;
@@ -1413,6 +1506,7 @@ static gboolean on_button(GtkWidget* widget, GdkEventButton* ev, gpointer) {
         }
     }
     if (app.resigned) return TRUE;
+    if (app.showGameOver) return TRUE;
     if (engineShouldMove()) return TRUE;
     int s = boardSquareFromXY(widget, x, y);
     if (s < 0) return FALSE;
@@ -1430,10 +1524,12 @@ static gboolean on_button(GtkWidget* widget, GdkEventButton* ev, gpointer) {
             } else if (app.game.makeMove(app.selected, s)) {
                 app.resigned = false;
                 app.resignedMessage.clear();
+                app.showGameOver = false;
+                app.gameOverText.clear();
                 app.game.save();
                 app.selected = -1;
                 gtk_widget_queue_draw(app.area);
-                maybeEngineMove();
+                if (!updateGameOverPopup()) maybeEngineMove();
             }
         }
     }
@@ -1460,7 +1556,9 @@ int main(int argc, char** argv) {
 
     gtk_init(&argc, &argv);
     loadAppSettings();
+    app.flipped = false;
     app.game.load();
+    updateGameOverPopup();
 
     app.window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
     gtk_window_set_title(GTK_WINDOW(app.window), "L:A_N:application_ID:org.garske.kindlechess_PC:T");

@@ -11,35 +11,50 @@ Native GTK2 chess app for jailbroken Kindle devices, intended for KUAL launch.
 - Last-move highlighting
 - Promotion selector
 - Undo
-- Board flip
 - Confirmed New Game flow
-- Resign button
 - Exit button
 - Optional board coordinates
 - Optional move-history panel
 - Settings overlay
-- UI font-size slider for larger Kindle-friendly text
+- A-/A+ UI font controls, up to size 50
 - Save/resume using `/mnt/us/extensions/kindlechess/data/save.txt`
 - Persistent settings using `/mnt/us/extensions/kindlechess/data/settings.txt`
-- Optional local UCI engine support
+- Optional local Stockfish/UCI engine support
+- Engine side and approximate Elo configured in Settings before the first move
+- Checkmate/stalemate game-over popup with New Game button
+- Optional custom PNG chess pieces
 - Designed for slow, high-contrast E Ink interaction
 
 ## Basic controls
 
 - **New**: asks for confirmation, then resets the board.
-- **Undo**: takes back the previous move.
-- **Flip**: flips board orientation.
-- **Resign**: ends the current local game by resignation.
-- **Settings**: opens toggles and the UI font-size slider.
-- **Engine**: cycles Off / Black / White. This only works after a UCI engine is added.
-- **Level**: cycles engine move time.
+- **Undo**: takes back the previous move. When playing against the engine, it attempts to take back the engine reply too.
+- **Settings**: opens display, engine, Elo, and piece-image options.
 - **Exit**: saves and returns to KUAL.
 
-In **Settings**, tap the font-size slider line to resize the main UI text. Settings are saved automatically.
+Removed from the top bar in this build:
+
+- Flip
+- Resign
+- Level/millisecond control
+
+## Settings
+
+Settings include:
+
+- **Engine**: cycles Off / Black / White.
+- **Elo -250 / Elo +250**: changes the engine strength display in 250 Elo steps.
+- **Coordinates**: toggles board coordinate labels.
+- **Move List**: toggles the move-history panel.
+- **A- / A+**: changes UI font size from 14 up to 50.
+- **Piece PNGs**: toggles custom piece images.
+- **Reload PNGs**: reloads custom piece images from storage.
+
+Engine side and Elo can only be changed before the first move of the game. After the first move, the Settings screen shows them as locked. Start a new game to change them.
 
 ## Engine support
 
-Stockfish is not bundled. Put a Kindle-compatible UCI engine binary at:
+Stockfish is expected at:
 
 ```text
 /mnt/us/extensions/kindlechess/bin/stockfish
@@ -54,12 +69,13 @@ Ponder = false
 MultiPV = 1
 ```
 
-Difficulty is controlled by move time:
+Engine strength is shown to the user as approximate Elo:
 
 ```text
-250 ms / 750 ms / 1500 ms / 3000 ms
+250 / 500 / 750 / 1000 / 1250 / 1500 / 1750 / 2000 / 2250 / 2500 / 2750 / 3000
 ```
 
+Internally, KindleChess uses that Elo setting to configure Stockfish with `Skill Level`, `UCI_LimitStrength`, and `UCI_Elo` where supported, and uses a bounded move-time search so the Kindle remains responsive.
 
 ## GitHub Actions cloud build
 
@@ -78,8 +94,6 @@ Steps:
 7. When it finishes, open the workflow run.
 8. Download the `kindlechess-kual` artifact.
 9. Unzip it and copy the `kindlechess` folder to `/mnt/us/extensions/kindlechess` on the Kindle.
-
-The workflow downloads the prebuilt `kindlehf` koxtoolchain release, installs the Kindle SDK into it, builds with Meson, packages the KUAL extension, and uploads `kindlechess-kual.zip` as a workflow artifact.
 
 ## Build for Kindle
 
@@ -116,11 +130,7 @@ chmod +x ./gen-sdk.sh
 ./gen-sdk.sh kindlehf
 ```
 
-At the end, note the path printed for `meson-crosscompile.txt`. It is commonly similar to:
-
-```text
-~/x-tools/arm-kindlehf-linux-gnueabihf/meson-crosscompile.txt
-```
+At the end, note the path printed for `meson-crosscompile.txt`.
 
 ### Build KindleChess
 
@@ -151,57 +161,9 @@ Unzip it and copy the `kindlechess` folder to the Kindle:
 
 Then launch it from KUAL.
 
-## Optional: build Stockfish for Kindle
-
-Stockfish cross-compilation is the least certain part because exact toolchain variables can differ. The app does not require Stockfish to launch.
-
-General shape:
-
-```bash
-git clone https://github.com/official-stockfish/Stockfish.git
-cd Stockfish/src
-make clean
-make -j$(nproc) build ARCH=armv7 COMP=gcc \
-  CXX=~/x-tools/arm-kindlehf-linux-gnueabihf/bin/arm-kindlepw2-linux-gnueabihf-g++
-```
-
-If the compiler path differs, inspect:
-
-```bash
-ls ~/x-tools/arm-kindlehf-linux-gnueabihf/bin
-```
-
-Then copy the produced binary to:
-
-```text
-/mnt/us/extensions/kindlechess/bin/stockfish
-```
-
-and make it executable:
-
-```bash
-chmod +x /mnt/us/extensions/kindlechess/bin/stockfish
-```
-
-If the newest Stockfish does not run on Kindle, try an older Stockfish release or a smaller UCI engine such as Fairy-Stockfish/older GNU Chess built for ARM hard-float.
-
-## Local desktop test
-
-On Linux with GTK2 dev packages installed:
-
-```bash
-meson setup builddir
-meson compile -C builddir
-./builddir/kindlechess
-```
-
-This is useful for testing rules/UI before cross-compiling.
-
-
 ## Exiting
 
-Tap the **Exit** button in the top toolbar. The game autosaves before quitting.
-
+Tap the **Exit** button in the top toolbar. The game autosaves before quitting. The engine child process is sent `quit`; if needed, the app follows up with SIGTERM/SIGKILL.
 
 ## Custom chess-piece PNGs
 
@@ -218,7 +180,7 @@ Recommended dimensions:
 PNG
 transparent background
 square canvas
-high-contrast black/white artwork
+centered piece art
 ```
 
 Required short filenames:
@@ -228,30 +190,11 @@ wk.png  wq.png  wr.png  wb.png  wn.png  wp.png
 bk.png  bq.png  br.png  bb.png  bn.png  bp.png
 ```
 
-Long filenames are also accepted:
+Long filenames also work:
 
 ```text
-white_king.png   white_queen.png   white_rook.png
-white_bishop.png white_knight.png  white_pawn.png
-black_king.png   black_queen.png   black_rook.png
-black_bishop.png black_knight.png  black_pawn.png
+white_king.png    white_queen.png   white_rook.png
+white_bishop.png  white_knight.png  white_pawn.png
+black_king.png    black_queen.png   black_rook.png
+black_bishop.png  black_knight.png  black_pawn.png
 ```
-
-The Settings menu includes:
-
-```text
-Piece PNGs: On/Off
-Reload PNGs
-```
-
-If a PNG is missing or invalid, the app falls back to built-in letter pieces for that specific piece.
-
-## Engine diagnostics
-
-If engine mode says `Engine did not answer uciok` or `readyok`, copy this file from the Kindle and inspect/send it:
-
-```text
-/mnt/us/extensions/kindlechess/data/engine.log
-```
-
-The app now waits longer for the first UCI handshake and records raw engine stdout/stderr to help diagnose incompatible Stockfish builds.
