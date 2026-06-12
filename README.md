@@ -1,80 +1,60 @@
 # KindleChess
 
-Native GTK2 chess app for jailbroken Kindle devices, intended for KUAL launch.
+A native chess app for jailbroken Kindle devices, designed for KUAL launch, E Ink displays, touch-first play, custom chess-piece PNGs, and optional local Stockfish engine support.
 
-## Features
+KindleChess is intentionally built like a Kindle app, not like a tablet game: high contrast, no animation loop, large touch targets, persistent saves, and minimal redraws.
 
-- Native C++17 / GTK2 UI
-- Full legal move generation: check, checkmate, stalemate, castling, en passant, promotion
-- Tap source square, tap destination square
-- Legal destination highlighting
-- Last-move highlighting
-- Promotion selector
-- Undo
-- Confirmed New Game flow
-- Exit button
-- Optional board coordinates
-- Optional move-history panel
-- Captured-piece display with extra reserved space for large-font layouts
-- Settings overlay
-- Larger default UI font
-- A-/A+ UI font controls, up to size 50
-- Optional move confirmation popup
-- Save/resume using `/mnt/us/extensions/kindlechess/data/save.txt`
-- Five manual save slots in `/mnt/us/extensions/kindlechess/data/slots/`
-- PGN export to `/mnt/us/extensions/kindlechess/data/games/`
-- Review mode with previous/next controls
-- Persistent settings using `/mnt/us/extensions/kindlechess/data/settings.txt`
+---
+
+## Highlights
+
+- Native C++17 / GTK2 Kindle application
+- KUAL-launchable homebrew extension
+- Full legal chess move handling
 - Optional local Stockfish/UCI engine support
-- Engine side and approximate Elo configured in Settings before the first move
-- Hint button using Stockfish
-- Restart Engine maintenance button
-- Better game-over popups with New Game button
-- Optional custom PNG chess pieces
-- Designed for slow, high-contrast E Ink interaction
+- Approximate Elo-based engine difficulty
+- Custom PNG chess-piece themes
+- Captured-piece display
+- Move history and review mode
+- PGN export
+- Five manual save slots
+- Autosave and resume
+- Large-font Kindle-friendly UI
+- Optional move confirmation
+- Dark-mode piece visibility correction
 
-## Basic controls
+---
 
-- **New**: asks for confirmation, then resets the board.
-- **Undo**: takes back the previous move. When playing against the engine, it attempts to take back the engine reply too.
-- **Settings**: opens display, engine, Elo, save/load, PGN, hint, review, and piece-image options.
-- **Exit**: saves and returns to KUAL.
+## Current feature set
 
-Removed from the top bar in this build:
+### Chess rules and board UI
 
-- Flip
-- Resign
-- Level/millisecond control
+- Legal move generation
+- Check, checkmate, and stalemate handling
+- Castling
+- En passant
+- Promotion selector
+- Legal-move highlighting
+- Last-move highlighting
+- Board coordinates toggle
+- Move-history panel toggle
+- Captured-piece display
+- Game-over popup with New Game action
 
-## Settings
+### Engine support
 
-Settings include:
+KindleChess can launch a local Stockfish binary as a child process and communicate with it through UCI.
 
-- **Engine**: cycles Off / Black / White.
-- **Elo -250 / Elo +250**: changes the engine strength display in 250 Elo steps.
-- **Hint**: asks Stockfish for a suggested move and highlights the source/destination squares.
-- **Restart Engine**: stops the Stockfish child process; it will restart on the next engine request.
-- **Export PGN**: writes a PGN file to `data/games/`.
-- **Confirm Moves**: toggles a confirmation popup before committing human moves.
-- **Save / Load**: opens five manual save slots with Save, Load, and Delete buttons.
-- **Review Game**: enters review mode with Prev / Next / Exit Review controls.
-- **Coordinates**: toggles board coordinate labels.
-- **Move List**: toggles the move-history panel.
-- **A- / A+**: changes UI font size from 14 up to 50. Button labels shrink-to-fit so large fonts do not spill outside their boxes.
-- **Piece PNGs**: toggles custom piece images.
-- **Reload PNGs**: reloads custom piece images from storage.
+Supported engine features:
 
-Engine side and Elo can only be changed before the first move of the game. After the first move, the Settings screen shows them as locked. Start a new game to change them.
+- Engine Off / Black / White
+- Approximate Elo selection in 250-point steps
+- Engine side and Elo lock after the first move
+- Hint button
+- Restart Engine maintenance action
+- Conservative Kindle-safe engine defaults
 
-## Engine support
-
-Stockfish is expected at:
-
-```text
-/mnt/us/extensions/kindlechess/bin/stockfish
-```
-
-The app launches it locally and sends UCI commands. Conservative settings are hardcoded:
+Default engine settings:
 
 ```text
 Threads = 1
@@ -83,46 +63,230 @@ Ponder = false
 MultiPV = 1
 ```
 
-Engine strength is shown to the user as approximate Elo:
+Stockfish is expected at:
 
 ```text
-250 / 500 / 750 / 1000 / 1250 / 1500 / 1750 / 2000 / 2250 / 2500 / 2750 / 3000
+/mnt/us/extensions/kindlechess/bin/stockfish
 ```
 
-Internally, KindleChess uses that Elo setting to configure Stockfish with `Skill Level`, `UCI_LimitStrength`, and `UCI_Elo` where supported, and uses a bounded move-time search so the Kindle remains responsive.
+### Save, export, and review
 
-## GitHub Actions cloud build
+- Autosave current game
+- Five manual save slots
+- Save / Load / Delete slot controls
+- PGN export
+- Review mode with previous/next move navigation
 
-This repo includes `.github/workflows/build-kindlehf.yml`.
+Data is stored under:
 
-Use a public GitHub repository for free standard GitHub-hosted runner usage.
+```text
+/mnt/us/extensions/kindlechess/data/
+```
 
-Steps:
+---
 
-1. Create a GitHub repository.
-2. Upload this project so `meson.build`, `src/`, `extension/`, `scripts/`, and `.github/` are at the repository root.
-3. Open the repository on GitHub.
-4. Go to **Actions**.
-5. Select **Build KindleChess for Kindle**.
-6. Click **Run workflow**.
-7. When it finishes, open the workflow run.
-8. Download the `kindlechess-kual` artifact.
-9. Unzip it and copy the `kindlechess` folder to `/mnt/us/extensions/kindlechess` on the Kindle.
+## Controls
 
-## Build for Kindle
+The top toolbar is intentionally minimal:
 
-Target selection:
+```text
+New | Undo | Settings | Exit
+```
 
-- Firmware >= 5.16.3: `kindlehf`
-- Firmware < 5.16.3 on PW2 or newer: `kindlepw2`
+### New
 
-The Paperwhite 12th gen will normally be `kindlehf` unless you are running unusual old firmware.
+Starts a new game after confirmation.
 
-### Ubuntu/WSL packages
+### Undo
+
+Takes back the previous move. When playing against the engine, KindleChess attempts to undo the engine reply as well.
+
+### Settings
+
+Opens all display, engine, save/load, PGN, hint, review, and custom-piece options.
+
+### Exit
+
+Autosaves and quits back to KUAL. If Stockfish is running, KindleChess sends `quit` and follows up with process cleanup if needed.
+
+---
+
+## Settings menu
+
+Available settings/actions include:
+
+- **Engine** — Off / Black / White
+- **Elo -250 / Elo +250** — adjust approximate engine strength
+- **Hint** — asks Stockfish for a suggested move and highlights it
+- **Restart Engine** — stops the Stockfish child process so it can relaunch cleanly
+- **Export PGN** — writes the current game as a PGN file
+- **Confirm Moves** — enables/disables move confirmation popups
+- **Save / Load** — opens the five-slot save manager
+- **Review Game** — enters move-review mode
+- **Coordinates** — toggles board coordinate labels
+- **Move List** — toggles the move-history panel
+- **A- / A+** — adjusts UI font size
+- **Piece PNGs** — toggles custom PNG chess pieces
+- **Reload PNGs** — reloads piece images from storage
+- **Dark Piece Fix** — Auto / Off / On piece inversion for Kindle dark mode
+
+Engine side and Elo can only be changed before the first move. Start a new game to unlock those options.
+
+---
+
+## Installation
+
+Build or download the KUAL package, then copy the extracted `kindlechess` folder to:
+
+```text
+/mnt/us/extensions/kindlechess
+```
+
+Final Kindle layout:
+
+```text
+/mnt/us/extensions/kindlechess/
+  config.xml
+  menu.json
+  bin/
+    start.sh
+    kindlechess
+    stockfish          # optional, if engine support is bundled
+  data/
+  pieces/
+    custom/
+```
+
+Launch from:
+
+```text
+KUAL → KindleChess
+```
+
+---
+
+## Custom chess-piece PNGs
+
+KindleChess supports user-supplied chess-piece images.
+
+Put custom pieces here:
+
+```text
+/mnt/us/extensions/kindlechess/pieces/custom/
+```
+
+Recommended image format:
+
+```text
+256 x 256 px
+PNG
+transparent background
+square canvas
+centered piece art
+high contrast for E Ink
+```
+
+Required short filenames:
+
+```text
+wk.png  wq.png  wr.png  wb.png  wn.png  wp.png
+bk.png  bq.png  br.png  bb.png  bn.png  bp.png
+```
+
+Long filenames are also supported:
+
+```text
+white_king.png    white_queen.png   white_rook.png
+white_bishop.png  white_knight.png  white_pawn.png
+black_king.png    black_queen.png   black_rook.png
+black_bishop.png  black_knight.png  black_pawn.png
+```
+
+After copying images, open KindleChess and use:
+
+```text
+Settings → Reload PNGs
+```
+
+If pieces are hard to see in Kindle dark mode, use:
+
+```text
+Settings → Dark Piece Fix → On
+```
+
+---
+
+## File locations
+
+```text
+/mnt/us/extensions/kindlechess/data/save.txt         Autosave
+/mnt/us/extensions/kindlechess/data/settings.txt     Persistent settings
+/mnt/us/extensions/kindlechess/data/engine.log       Engine diagnostics
+/mnt/us/extensions/kindlechess/data/games/           PGN exports
+/mnt/us/extensions/kindlechess/data/slots/           Manual save slots
+/mnt/us/extensions/kindlechess/pieces/custom/        Custom piece PNGs
+```
+
+---
+
+## GitHub Actions build
+
+This project can be built in GitHub Actions using an Ubuntu runner, the Kindle `kindlehf` toolchain, and the Kindle SDK.
+
+Recommended repository layout:
+
+```text
+.github/
+  workflows/
+    main.yml
+src/
+extension/
+scripts/
+meson.build
+meson.options
+README.md
+```
+
+Build steps:
+
+1. Push the project to GitHub.
+2. Open the repository's **Actions** tab.
+3. Run **Build KindleChess for Kindle**.
+4. Download the `kindlechess-kual` artifact.
+5. Extract the artifact.
+6. Copy the resulting `kindlechess` folder to the Kindle's `extensions` folder.
+
+For public repositories, standard GitHub-hosted Actions runners are generally free to use.
+
+---
+
+## Local build notes
+
+The easiest local build environment on Windows is WSL2 Ubuntu. Native Windows/PowerShell builds are not recommended because the target is an ARM Linux Kindle binary.
+
+### Target selection
+
+```text
+kindlehf   Firmware 5.16.3+
+kindlepw2  Older PW2-or-newer firmware below 5.16.3
+```
+
+For a Kindle Paperwhite 12th generation, use:
+
+```text
+kindlehf
+```
+
+### Required host packages
 
 ```bash
 sudo apt update
-sudo apt install -y build-essential autoconf automake bison flex gawk libtool libtool-bin libncurses-dev curl file git gperf help2man texinfo unzip wget sed libarchive-dev nettle-dev meson gtk2.0 libgtk2.0-dev zip
+sudo apt install -y \
+  build-essential autoconf automake bison flex gawk \
+  libtool libtool-bin libncurses-dev curl file git gperf \
+  help2man texinfo unzip wget sed libarchive-dev nettle-dev \
+  meson ninja-build pkg-config zip python3 make binutils \
+  gtk2.0 libgtk2.0-dev
 ```
 
 ### Build koxtoolchain
@@ -144,11 +308,9 @@ chmod +x ./gen-sdk.sh
 ./gen-sdk.sh kindlehf
 ```
 
-At the end, note the path printed for `meson-crosscompile.txt`.
-
 ### Build KindleChess
 
-From this project directory:
+From the project root:
 
 ```bash
 meson setup --cross-file ~/x-tools/arm-kindlehf-linux-gnueabihf/meson-crosscompile.txt builddir_kindlehf
@@ -161,75 +323,91 @@ meson compile -C builddir_kindlehf
 ./scripts/package-kual.sh ./builddir_kindlehf/kindlechess
 ```
 
-This creates:
+The package is written to:
 
 ```text
 dist/kindlechess-kual.zip
 ```
 
-Unzip it and copy the `kindlechess` folder to the Kindle:
+---
+
+## Troubleshooting
+
+### Engine says it did not answer `uciok`
+
+Check:
 
 ```text
-/mnt/us/extensions/kindlechess
+/mnt/us/extensions/kindlechess/data/engine.log
 ```
 
-Then launch it from KUAL.
+Common causes:
 
-## Exiting
+- `stockfish` is missing
+- `stockfish` is not executable
+- `stockfish` was built for the wrong CPU/architecture
+- dynamic runtime dependency mismatch
+- Stockfish crashed before answering UCI startup
 
-Tap the **Exit** button in the top toolbar. The game autosaves before quitting. The engine child process is sent `quit`; if needed, the app follows up with SIGTERM/SIGKILL.
+### Custom pieces do not show
 
-## Custom chess-piece PNGs
-
-KindleChess can use user-supplied PNG images for the pieces. Put transparent PNGs here on the Kindle:
+Check that files are in:
 
 ```text
 /mnt/us/extensions/kindlechess/pieces/custom/
 ```
 
-Recommended dimensions:
+Then use:
 
 ```text
-256 x 256 px
-PNG
-transparent background
-square canvas
-centered piece art
+Settings → Piece PNGs → On
+Settings → Reload PNGs
 ```
 
-Required short filenames:
+If one piece is missing or invalid, KindleChess falls back to the built-in piece rendering for that piece.
+
+### Font or layout looks wrong
+
+Settings are persisted here:
 
 ```text
-wk.png  wq.png  wr.png  wb.png  wn.png  wp.png
-bk.png  bq.png  br.png  bb.png  bn.png  bp.png
+/mnt/us/extensions/kindlechess/data/settings.txt
 ```
 
-Long filenames also work:
+Delete that file to reset display settings to defaults.
 
-```text
-white_king.png    white_queen.png   white_rook.png
-white_bishop.png  white_knight.png  white_pawn.png
-black_king.png    black_queen.png   black_rook.png
-black_bishop.png  black_knight.png  black_pawn.png
-```
+---
 
+## Design goals
 
-Default UI font size: 40.
+KindleChess is optimized for:
 
-## UI readability changes
+- E Ink readability
+- low redraw frequency
+- large touch targets
+- local/offline play
+- stable KUAL launch behavior
+- battery-conscious engine usage
+- user-customizable piece themes
 
-This build makes the Settings overlay substantially larger and more readable than the board UI. Settings text is intentionally drawn about 20 points larger than the configured UI font size, while button text still shrink-fits to avoid clipping.
+It intentionally avoids:
 
-The captured-piece display now has its own gray background box with a black border, larger labels, and larger captured-piece icons. This makes black and white pieces readable even with custom PNGs and large UI fonts.
+- online chess services
+- browser/webview runtime
+- animations
+- continuous engine analysis by default
+- crowded top-bar controls
 
-## Kindle dark-mode piece handling
+---
 
-Settings includes:
+## License notes
 
-```text
-Dark Piece Fix: Auto / Off / On
-```
+A project license file should be added before public release.
 
-Use **Auto** first. The app attempts to detect Kindle dark/night/inverted-display preference files. Because Kindle firmware does not provide a stable public dark-mode API for homebrew apps, use **On** if your Kindle is in dark mode and the pieces look inverted or hard to distinguish. Use **Off** for normal light mode.
+If distributing a build that includes Stockfish, comply with Stockfish's GPLv3 license requirements and include the relevant license and attribution files in the packaged extension.
 
-This setting pre-inverts the piece PNG color palette before drawing. It also swaps the fallback built-in black/white letter-piece colors so pieces remain readable under display inversion.
+---
+
+## Status
+
+KindleChess is under active homebrew development and is currently targeted at jailbroken Kindle devices launched through KUAL.
