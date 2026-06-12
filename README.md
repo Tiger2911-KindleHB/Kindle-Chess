@@ -7,12 +7,35 @@ Native GTK2 chess app for jailbroken Kindle devices, intended for KUAL launch.
 - Native C++17 / GTK2 UI
 - Full legal move generation: check, checkmate, stalemate, castling, en passant, promotion
 - Tap source square, tap destination square
+- Legal destination highlighting
+- Last-move highlighting
 - Promotion selector
 - Undo
 - Board flip
+- Confirmed New Game flow
+- Resign button
+- Exit button
+- Optional board coordinates
+- Optional move-history panel
+- Settings overlay
+- UI font-size slider for larger Kindle-friendly text
 - Save/resume using `/mnt/us/extensions/kindlechess/data/save.txt`
+- Persistent settings using `/mnt/us/extensions/kindlechess/data/settings.txt`
 - Optional local UCI engine support
 - Designed for slow, high-contrast E Ink interaction
+
+## Basic controls
+
+- **New**: asks for confirmation, then resets the board.
+- **Undo**: takes back the previous move.
+- **Flip**: flips board orientation.
+- **Resign**: ends the current local game by resignation.
+- **Settings**: opens toggles and the UI font-size slider.
+- **Engine**: cycles Off / Black / White. This only works after a UCI engine is added.
+- **Level**: cycles engine move time.
+- **Exit**: saves and returns to KUAL.
+
+In **Settings**, tap the font-size slider line to resize the main UI text. Settings are saved automatically.
 
 ## Engine support
 
@@ -173,3 +196,52 @@ meson compile -C builddir
 ```
 
 This is useful for testing rules/UI before cross-compiling.
+
+
+## Exiting
+
+Tap the **Exit** button in the top toolbar. The game autosaves before quitting.
+
+
+## Custom chess-piece PNGs
+
+KindleChess can use user-supplied PNG images for the pieces. Put transparent PNGs here on the Kindle:
+
+```text
+/mnt/us/extensions/kindlechess/pieces/custom/
+```
+
+Recommended dimensions:
+
+```text
+256 x 256 px
+PNG
+transparent background
+square canvas
+high-contrast black/white artwork
+```
+
+Required short filenames:
+
+```text
+wk.png  wq.png  wr.png  wb.png  wn.png  wp.png
+bk.png  bq.png  br.png  bb.png  bn.png  bp.png
+```
+
+Long filenames are also accepted:
+
+```text
+white_king.png   white_queen.png   white_rook.png
+white_bishop.png white_knight.png  white_pawn.png
+black_king.png   black_queen.png   black_rook.png
+black_bishop.png black_knight.png  black_pawn.png
+```
+
+The Settings menu includes:
+
+```text
+Piece PNGs: On/Off
+Reload PNGs
+```
+
+If a PNG is missing or invalid, the app falls back to built-in letter pieces for that specific piece.

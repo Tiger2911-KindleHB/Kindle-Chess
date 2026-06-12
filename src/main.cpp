@@ -56,6 +56,9 @@ static std::string home_dir() {
     return "/mnt/us/extensions/kindlechess";
 }
 static std::string save_path() { return home_dir() + "/data/save.txt"; }
+static std::string settings_path() { return home_dir() + "/data/settings.txt"; }
+static std::string pieces_custom_dir() { return home_dir() + "/pieces/custom"; }
+static std::string pieces_default_dir() { return home_dir() + "/pieces/default"; }
 
 struct Move {
     int from = -1;
@@ -607,9 +610,63 @@ struct App {
     std::string uiStatus;
     int pendingFrom = -1;
     int pendingTo = -1;
+
+    bool showSettings = false;
+    bool confirmNew = false;
+    bool resigned = false;
+    std::string resignedMessage;
+
+    bool showCoordinates = true;
+    bool showMoveList = true;
+    int uiFontSize = 22;
+    bool usePieceImages = true;
+    bool pieceImagesLoaded = false;
+    std::array<GdkPixbuf*, 128> pieceImages{};
+
+    std::vector<RectButton> overlayButtons;
+    int sliderX = 0, sliderY = 0, sliderW = 0, sliderH = 0;
 };
 
 static App app;
+
+static int clampInt(int v, int lo, int hi) {
+    return std::max(lo, std::min(hi, v));
+}
+
+static void ensure_data_dir() {
+    std::string dir = home_dir() + "/data";
+    mkdir(dir.c_str(), 0755);
+}
+
+static void saveAppSettings() {
+    ensure_data_dir();
+    std::ofstream f(settings_path().c_str());
+    if (!f) return;
+    f << "KINDLECHESS_SETTINGS 1\n";
+    f << "ui_font_size=" << app.uiFontSize << "\n";
+    f << "show_coordinates=" << (app.showCoordinates ? 1 : 0) << "\n";
+    f << "show_move_list=" << (app.showMoveList ? 1 : 0) << "\n";
+    f << "flipped=" << (app.flipped ? 1 : 0) << "\n";
+    f << "use_piece_images=" << (app.usePieceImages ? 1 : 0) << "\n";
+}
+
+static void loadAppSettings() {
+    std::ifstream f(settings_path().c_str());
+    if (!f) return;
+    std::string line;
+    while (std::getline(f, line)) {
+        auto eq = line.find('=');
+        if (eq == std::string::npos) continue;
+        std::string key = line.substr(0, eq);
+        std::string val = line.substr(eq + 1);
+        int n = std::atoi(val.c_str());
+        if (key == "ui_font_size") app.uiFontSize = clampInt(n, 14, 34);
+        else if (key == "show_coordinates") app.showCoordinates = n != 0;
+        else if (key == "show_move_list") app.showMoveList = n != 0;
+        else if (key == "flipped") app.flipped = n != 0;
+        else if (key == "use_piece_images") app.usePieceImages = n != 0;
+    }
+}
 
 static std::string engine_path() {
     const char* e = std::getenv("KINDLECHESS_ENGINE");
@@ -618,6 +675,7 @@ static std::string engine_path() {
 }
 
 static bool engineShouldMove() {
+    if (app.resigned) return false;
     if (app.engineMode == EngineMode::Off) return false;
     if (app.game.whiteToMove() && app.engineMode == EngineMode::White) return true;
     if (!app.game.whiteToMove() && app.engineMode == EngineMode::Black) return true;
@@ -628,6 +686,105 @@ static std::string engineModeLabel() {
     if (app.engineMode == EngineMode::Off) return "Engine: Off";
     if (app.engineMode == EngineMode::Black) return "Engine: Black";
     return "Engine: White";
+}
+
+
+static std::string pieceShortName(char p) {
+    bool white = is_white_piece(p);
+    char t = piece_type(p);
+    std::string out;
+    out.push_back(white ? 'w' : 'b');
+    out.push_back(t);
+    return out;
+}
+
+static std::string pieceLongName(char p) {
+    std::string color = is_white_piece(p) ? "white_" : "black_";
+    switch (piece_type(p)) {
+        case 'k': return color + "king";
+        case 'q': return color + "queen";
+        case 'r': return color + "rook";
+        case 'b': return color + "bishop";
+        case 'n': return color + "knight";
+        case 'p': return color + "pawn";
+    }
+    return "";
+}
+
+static bool fileExists(const std::string& path) {
+    struct stat st{};
+    return stat(path.c_str(), &st) == 0 && S_ISREG(st.st_mode);
+}
+
+static GdkPixbuf* loadPieceFile(const std::string& path) {
+    if (!fileExists(path)) return nullptr;
+    GError* err = nullptr;
+    GdkPixbuf* pix = gdk_pixbuf_new_from_file(path.c_str(), &err);
+    if (err) g_error_free(err);
+    return pix;
+}
+
+static void freePieceImages() {
+    for (auto& pix : app.pieceImages) {
+        if (pix) {
+            g_object_unref(G_OBJECT(pix));
+            pix = nullptr;
+        }
+    }
+    app.pieceImagesLoaded = false;
+}
+
+static GdkPixbuf* tryLoadPieceImage(char p) {
+    if (p == '.') return nullptr;
+    std::vector<std::string> dirs{pieces_custom_dir(), pieces_default_dir()};
+    std::vector<std::string> names{
+        pieceShortName(p) + ".png",
+        pieceLongName(p) + ".png"
+    };
+    for (const auto& dir : dirs) {
+        for (const auto& name : names) {
+            GdkPixbuf* pix = loadPieceFile(dir + "/" + name);
+            if (pix) return pix;
+        }
+    }
+    return nullptr;
+}
+
+static void loadPieceImages() {
+    freePieceImages();
+    const char pieces[] = {'K','Q','R','B','N','P','k','q','r','b','n','p'};
+    for (char p : pieces) {
+        app.pieceImages[(unsigned char)p] = tryLoadPieceImage(p);
+    }
+    app.pieceImagesLoaded = true;
+}
+
+static bool haveAllPieceImages() {
+    if (!app.pieceImagesLoaded) loadPieceImages();
+    const char pieces[] = {'K','Q','R','B','N','P','k','q','r','b','n','p'};
+    for (char p : pieces) if (!app.pieceImages[(unsigned char)p]) return false;
+    return true;
+}
+
+static bool drawPieceImage(cairo_t* cr, char p, double x, double y, double cell) {
+    if (!app.usePieceImages) return false;
+    if (!app.pieceImagesLoaded) loadPieceImages();
+    GdkPixbuf* pix = app.pieceImages[(unsigned char)p];
+    if (!pix) return false;
+    int pw = gdk_pixbuf_get_width(pix);
+    int ph = gdk_pixbuf_get_height(pix);
+    if (pw <= 0 || ph <= 0) return false;
+    double target = cell * 0.86;
+    double scale = target / std::max(pw, ph);
+    double dx = x + (cell - pw * scale) / 2.0;
+    double dy = y + (cell - ph * scale) / 2.0;
+    cairo_save(cr);
+    cairo_translate(cr, dx, dy);
+    cairo_scale(cr, scale, scale);
+    gdk_cairo_set_source_pixbuf(cr, pix, 0, 0);
+    cairo_paint(cr);
+    cairo_restore(cr);
+    return true;
 }
 
 static std::string pieceLetter(char p) {
@@ -653,42 +810,262 @@ static void drawTextCentered(cairo_t* cr, const std::string& text, double x, dou
     cairo_show_text(cr, text.c_str());
 }
 
-static gboolean on_draw(GtkWidget* widget, GdkEventExpose*, gpointer) {
-    cairo_t* cr = gdk_cairo_create(widget->window);
+static void drawTextLeft(cairo_t* cr, const std::string& text, double x, double y, double size, bool bold=false) {
+    cairo_select_font_face(cr, "sans-serif", CAIRO_FONT_SLANT_NORMAL, bold ? CAIRO_FONT_WEIGHT_BOLD : CAIRO_FONT_WEIGHT_NORMAL);
+    cairo_set_font_size(cr, size);
+    cairo_move_to(cr, x, y);
+    cairo_show_text(cr, text.c_str());
+}
+
+static std::vector<std::string> toolbarLabels() {
+    return {"New", "Undo", "Flip", "Resign", "Settings", engineModeLabel(), "Level: " + std::to_string(app.movetimes[app.levelIndex]) + "ms", "Exit"};
+}
+
+static int buttonWidthFor(const std::string& label) {
+    int base = 46 + (int)label.size() * std::max(8, app.uiFontSize / 2);
+    if (label.rfind("Engine", 0) == 0) base += 22;
+    if (label.rfind("Level", 0) == 0) base += 12;
+    return clampInt(base, 78, 190);
+}
+
+static int toolbarHeightFor(int W) {
+    int margin = 8;
+    int rowH = std::max(38, app.uiFontSize + 24);
+    int rows = 1;
+    int bx = margin;
+    for (const auto& label : toolbarLabels()) {
+        int bw = buttonWidthFor(label);
+        if (bx + bw > W - margin && bx > margin) {
+            rows++;
+            bx = margin;
+        }
+        bx += bw + 8;
+    }
+    return margin + rows * rowH + margin;
+}
+
+struct Layout {
+    int W = 0, H = 0;
+    int margin = 8;
+    int topH = 64;
+    int statusH = 76;
+    int board = 0, boardX = 0, boardY = 0, cell = 0;
+    bool hasPanel = false;
+    int panelX = 0, panelY = 0, panelW = 0, panelH = 0;
+};
+
+static Layout computeLayout(GtkWidget* widget) {
     GtkAllocation a;
     gtk_widget_get_allocation(widget, &a);
-    int W = a.width, H = a.height;
+    Layout L;
+    L.W = a.width; L.H = a.height;
+    L.margin = 8;
+    L.topH = toolbarHeightFor(L.W);
+    L.statusH = std::max(74, app.uiFontSize * 3 + 14);
+
+    int availableW = L.W - 2 * L.margin;
+    int availableH = L.H - L.topH - L.statusH - 2 * L.margin;
+    int requestedPanelW = app.showMoveList ? std::max(160, app.uiFontSize * 8) : 0;
+    L.hasPanel = app.showMoveList && L.W >= 850 && requestedPanelW + 360 < availableW;
+    int boardAreaW = availableW - (L.hasPanel ? requestedPanelW + L.margin : 0);
+    int boardMax = std::min(boardAreaW, availableH);
+    L.board = boardMax - (boardMax % 8);
+    if (L.board < 240) L.board = boardMax;
+    L.cell = std::max(1, L.board / 8);
+    L.boardX = L.hasPanel ? L.margin : (L.W - L.board) / 2;
+    L.boardY = L.topH + ((availableH - L.board) / 2);
+    if (L.boardY < L.topH + L.margin) L.boardY = L.topH + L.margin;
+    if (L.hasPanel) {
+        L.panelX = L.boardX + L.board + L.margin;
+        L.panelY = L.boardY;
+        L.panelW = L.W - L.panelX - L.margin;
+        L.panelH = L.board;
+    }
+    return L;
+}
+
+static std::string moveSummaryLine() {
+    const auto& moves = app.game.uciMoves();
+    std::ostringstream os;
+    os << "Move " << (moves.size() / 2 + 1);
+    if (!moves.empty()) os << "  Last: " << moves.back();
+    os << "  " << engineModeLabel();
+    return os.str();
+}
+
+static void lastMoveSquares(int& from, int& to) {
+    from = -1; to = -1;
+    const auto& moves = app.game.uciMoves();
+    if (moves.empty()) return;
+    const std::string& u = moves.back();
+    if (u.size() < 4) return;
+    from = parse_square(u.substr(0, 2));
+    to = parse_square(u.substr(2, 2));
+}
+
+static std::vector<std::string> moveHistoryLines(int maxLines) {
+    std::vector<std::string> lines;
+    const auto& m = app.game.uciMoves();
+    for (size_t i = 0; i < m.size(); i += 2) {
+        std::ostringstream os;
+        os << (i / 2 + 1) << ". " << m[i];
+        if (i + 1 < m.size()) os << "  " << m[i + 1];
+        lines.push_back(os.str());
+    }
+    if ((int)lines.size() > maxLines) lines.erase(lines.begin(), lines.begin() + ((int)lines.size() - maxLines));
+    return lines;
+}
+
+static void drawButton(cairo_t* cr, const RectButton& b, double fontSize) {
+    cairo_set_source_rgb(cr, 0.15, 0.15, 0.15);
+    cairo_rectangle(cr, b.x, b.y, b.w, b.h);
+    cairo_stroke(cr);
+    cairo_set_source_rgb(cr, 0.0, 0.0, 0.0);
+    drawTextCentered(cr, b.label, b.x, b.y, b.w, b.h, fontSize, true);
+}
+
+static void drawToolbar(cairo_t* cr, int W) {
+    app.buttons.clear();
+    int margin = 8;
+    int rowH = std::max(38, app.uiFontSize + 24);
+    int bx = margin;
+    int by = margin;
+    for (const auto& label : toolbarLabels()) {
+        int bw = buttonWidthFor(label);
+        if (bx + bw > W - margin && bx > margin) {
+            bx = margin;
+            by += rowH;
+        }
+        RectButton b{label, bx, by, bw, rowH - 8};
+        app.buttons.push_back(b);
+        drawButton(cr, b, std::max(14, app.uiFontSize - 4));
+        bx += bw + 8;
+    }
+}
+
+static void drawMovePanel(cairo_t* cr, const Layout& L) {
+    if (!L.hasPanel) return;
+    cairo_set_source_rgb(cr, 0.88, 0.88, 0.84);
+    cairo_rectangle(cr, L.panelX, L.panelY, L.panelW, L.panelH);
+    cairo_fill_preserve(cr);
+    cairo_set_source_rgb(cr, 0.0, 0.0, 0.0);
+    cairo_set_line_width(cr, 2.0);
+    cairo_stroke(cr);
+    drawTextCentered(cr, "Moves", L.panelX, L.panelY + 6, L.panelW, 30, std::max(16, app.uiFontSize - 2), true);
+    int lineH = std::max(20, app.uiFontSize + 4);
+    int maxLines = std::max(1, (L.panelH - 48) / lineH);
+    auto lines = moveHistoryLines(maxLines);
+    int y = L.panelY + 48;
+    for (const auto& line : lines) {
+        drawTextLeft(cr, line, L.panelX + 12, y, std::max(13, app.uiFontSize - 5), false);
+        y += lineH;
+    }
+}
+
+static void drawCoordinates(cairo_t* cr, const Layout& L) {
+    if (!app.showCoordinates || L.cell < 34) return;
+    cairo_set_source_rgb(cr, 0.0, 0.0, 0.0);
+    int fs = std::max(10, app.uiFontSize - 9);
+    for (int vf = 0; vf < 8; ++vf) {
+        int bf = app.flipped ? 7 - vf : vf;
+        std::string file(1, (char)('a' + bf));
+        drawTextCentered(cr, file, L.boardX + vf * L.cell, L.boardY + L.board - fs - 2, L.cell, fs + 2, fs, true);
+    }
+    for (int vr = 0; vr < 8; ++vr) {
+        int br = app.flipped ? 7 - vr : vr;
+        std::string rank(1, (char)('8' - br));
+        drawTextCentered(cr, rank, L.boardX + 2, L.boardY + vr * L.cell + 1, fs + 4, fs + 6, fs, true);
+    }
+}
+
+static void drawConfirmNew(cairo_t* cr, const Layout& L) {
+    app.overlayButtons.clear();
+    double ow = std::min((double)L.W * 0.84, 620.0);
+    double oh = 230;
+    double ox = (L.W - ow) / 2.0;
+    double oy = (L.H - oh) / 2.0;
+    cairo_set_source_rgb(cr, 0.94, 0.94, 0.90);
+    cairo_rectangle(cr, ox, oy, ow, oh);
+    cairo_fill_preserve(cr);
+    cairo_set_source_rgb(cr, 0,0,0);
+    cairo_set_line_width(cr, 4.0);
+    cairo_stroke(cr);
+    drawTextCentered(cr, "Start a new game?", ox, oy + 20, ow, 42, app.uiFontSize + 2, true);
+    drawTextCentered(cr, "This will replace the current saved game.", ox + 20, oy + 76, ow - 40, 36, std::max(15, app.uiFontSize - 4), false);
+    int bw = 190, bh = 56;
+    RectButton cancel{"Cancel", (int)(ox + ow/2 - bw - 12), (int)(oy + oh - bh - 24), bw, bh};
+    RectButton yes{"New Game", (int)(ox + ow/2 + 12), (int)(oy + oh - bh - 24), bw, bh};
+    app.overlayButtons.push_back(cancel); app.overlayButtons.push_back(yes);
+    drawButton(cr, cancel, std::max(16, app.uiFontSize - 2));
+    drawButton(cr, yes, std::max(16, app.uiFontSize - 2));
+}
+
+static void drawSettings(cairo_t* cr, const Layout& L) {
+    app.overlayButtons.clear();
+    double ow = std::min((double)L.W * 0.88, 760.0);
+    double oh = std::min((double)L.H * 0.70, 650.0);
+    double ox = (L.W - ow) / 2.0;
+    double oy = (L.H - oh) / 2.0;
+    cairo_set_source_rgb(cr, 0.94, 0.94, 0.90);
+    cairo_rectangle(cr, ox, oy, ow, oh);
+    cairo_fill_preserve(cr);
+    cairo_set_source_rgb(cr, 0,0,0);
+    cairo_set_line_width(cr, 4.0);
+    cairo_stroke(cr);
+
+    drawTextCentered(cr, "Settings", ox, oy + 16, ow, 44, app.uiFontSize + 4, true);
+    drawTextLeft(cr, "UI font size", ox + 42, oy + 100, std::max(16, app.uiFontSize - 2), true);
+    drawTextLeft(cr, std::to_string(app.uiFontSize), ox + ow - 82, oy + 100, std::max(16, app.uiFontSize - 2), true);
+
+    app.sliderX = (int)(ox + 42);
+    app.sliderY = (int)(oy + 126);
+    app.sliderW = (int)(ow - 84);
+    app.sliderH = 48;
+    cairo_set_source_rgb(cr, 0,0,0);
+    cairo_set_line_width(cr, 4.0);
+    cairo_move_to(cr, app.sliderX, app.sliderY + app.sliderH / 2.0);
+    cairo_line_to(cr, app.sliderX + app.sliderW, app.sliderY + app.sliderH / 2.0);
+    cairo_stroke(cr);
+    double t = (app.uiFontSize - 14) / 20.0;
+    double kx = app.sliderX + t * app.sliderW;
+    cairo_arc(cr, kx, app.sliderY + app.sliderH / 2.0, 15, 0, 6.28318);
+    cairo_fill(cr);
+    drawTextCentered(cr, "Tap the line to resize all main UI text.", ox + 42, oy + 174, ow - 84, 28, std::max(13, app.uiFontSize - 7), false);
+
+    int bw = (int)((ow - 96) / 2.0);
+    int bh = 56;
+    int left = (int)(ox + 42);
+    int right = left + bw + 12;
+    int y1 = (int)(oy + 230);
+    RectButton coords{std::string("Coordinates: ") + (app.showCoordinates ? "On" : "Off"), left, y1, bw, bh};
+    RectButton moves{std::string("Move List: ") + (app.showMoveList ? "On" : "Off"), right, y1, bw, bh};
+    RectButton smaller{"A-", left, y1 + 78, bw, bh};
+    RectButton bigger{"A+", right, y1 + 78, bw, bh};
+    RectButton pieceMode{std::string("Piece PNGs: ") + (app.usePieceImages ? "On" : "Off"), left, y1 + 156, bw, bh};
+    RectButton reloadPieces{"Reload PNGs", right, y1 + 156, bw, bh};
+    RectButton close{"Close Settings", left, y1 + 234, bw * 2 + 12, bh};
+    app.overlayButtons.push_back(coords); app.overlayButtons.push_back(moves);
+    app.overlayButtons.push_back(smaller); app.overlayButtons.push_back(bigger);
+    app.overlayButtons.push_back(pieceMode); app.overlayButtons.push_back(reloadPieces);
+    app.overlayButtons.push_back(close);
+    for (const auto& b : app.overlayButtons) drawButton(cr, b, std::max(15, app.uiFontSize - 3));
+}
+
+static gboolean on_draw(GtkWidget* widget, GdkEventExpose*, gpointer) {
+    cairo_t* cr = gdk_cairo_create(widget->window);
+    Layout L = computeLayout(widget);
+    int W = L.W, H = L.H;
+
     cairo_set_source_rgb(cr, 0.92, 0.92, 0.90);
     cairo_paint(cr);
 
-    app.buttons.clear();
-    int topH = 58;
-    int statusH = 56;
-    int margin = 8;
-    std::vector<std::string> labels = {"New", "Undo", "Flip", engineModeLabel(), "Level: " + std::to_string(app.movetimes[app.levelIndex]) + "ms"};
-    int bx = margin;
-    for (const auto& label : labels) {
-        int bw = (label.size() > 9) ? 150 : 78;
-        if (label.rfind("Level", 0) == 0) bw = 140;
-        RectButton b{label, bx, margin, bw, topH - 2 * margin};
-        app.buttons.push_back(b);
-        cairo_set_source_rgb(cr, 0.15, 0.15, 0.15);
-        cairo_rectangle(cr, b.x, b.y, b.w, b.h);
-        cairo_stroke(cr);
-        cairo_set_source_rgb(cr, 0.0, 0.0, 0.0);
-        drawTextCentered(cr, label, b.x, b.y, b.w, b.h, 16, true);
-        bx += bw + 8;
-    }
-
-    int boardMax = std::min(W - 2 * margin, H - topH - statusH - 2 * margin);
-    int board = boardMax - (boardMax % 8);
-    if (board < 240) board = boardMax;
-    int boardX = (W - board) / 2;
-    int boardY = topH + ((H - topH - statusH - board) / 2);
-    int cell = board / 8;
+    drawToolbar(cr, W);
 
     std::vector<Move> selectedMoves;
     if (app.selected >= 0) selectedMoves = app.game.legalMovesFrom(app.selected);
+
+    int lastFrom = -1, lastTo = -1;
+    lastMoveSquares(lastFrom, lastTo);
 
     for (int vr = 0; vr < 8; ++vr) {
         for (int vf = 0; vf < 8; ++vf) {
@@ -698,13 +1075,19 @@ static gboolean on_draw(GtkWidget* widget, GdkEventExpose*, gpointer) {
             bool light = ((br + bf) % 2 == 0);
             if (light) cairo_set_source_rgb(cr, 0.82, 0.82, 0.78);
             else cairo_set_source_rgb(cr, 0.55, 0.55, 0.52);
-            cairo_rectangle(cr, boardX + vf * cell, boardY + vr * cell, cell, cell);
+            cairo_rectangle(cr, L.boardX + vf * L.cell, L.boardY + vr * L.cell, L.cell, L.cell);
             cairo_fill(cr);
+
+            if (s == lastFrom || s == lastTo) {
+                cairo_set_source_rgba(cr, 0.0, 0.0, 0.0, 0.18);
+                cairo_rectangle(cr, L.boardX + vf * L.cell + 4, L.boardY + vr * L.cell + 4, L.cell - 8, L.cell - 8);
+                cairo_fill(cr);
+            }
 
             if (s == app.selected) {
                 cairo_set_source_rgb(cr, 0.0, 0.0, 0.0);
                 cairo_set_line_width(cr, 4.0);
-                cairo_rectangle(cr, boardX + vf * cell + 3, boardY + vr * cell + 3, cell - 6, cell - 6);
+                cairo_rectangle(cr, L.boardX + vf * L.cell + 3, L.boardY + vr * L.cell + 3, L.cell - 6, L.cell - 6);
                 cairo_stroke(cr);
                 cairo_set_line_width(cr, 1.0);
             }
@@ -712,70 +1095,84 @@ static gboolean on_draw(GtkWidget* widget, GdkEventExpose*, gpointer) {
             bool isTarget = false;
             for (const auto& m : selectedMoves) if (m.to == s) { isTarget = true; break; }
             if (isTarget) {
-                cairo_set_source_rgba(cr, 0.0, 0.0, 0.0, 0.55);
-                cairo_arc(cr, boardX + vf * cell + cell / 2.0, boardY + vr * cell + cell / 2.0, cell * 0.12, 0, 6.28318);
-                cairo_fill(cr);
+                cairo_set_source_rgba(cr, 0.0, 0.0, 0.0, 0.58);
+                if (app.game.pieceAt(s) == '.') {
+                    cairo_arc(cr, L.boardX + vf * L.cell + L.cell / 2.0, L.boardY + vr * L.cell + L.cell / 2.0, L.cell * 0.12, 0, 6.28318);
+                    cairo_fill(cr);
+                } else {
+                    cairo_set_line_width(cr, 5.0);
+                    cairo_rectangle(cr, L.boardX + vf * L.cell + 5, L.boardY + vr * L.cell + 5, L.cell - 10, L.cell - 10);
+                    cairo_stroke(cr);
+                    cairo_set_line_width(cr, 1.0);
+                }
             }
 
             char p = app.game.pieceAt(s);
             if (p != '.') {
-                double cx = boardX + vf * cell + cell / 2.0;
-                double cy = boardY + vr * cell + cell / 2.0;
-                double rad = cell * 0.36;
-                if (is_white_piece(p)) {
-                    cairo_set_source_rgb(cr, 0.96, 0.96, 0.92);
-                    cairo_arc(cr, cx, cy, rad, 0, 6.28318);
-                    cairo_fill_preserve(cr);
-                    cairo_set_source_rgb(cr, 0.0, 0.0, 0.0);
-                    cairo_set_line_width(cr, 2.0);
-                    cairo_stroke(cr);
-                    cairo_set_source_rgb(cr, 0.0, 0.0, 0.0);
-                } else {
-                    cairo_set_source_rgb(cr, 0.03, 0.03, 0.03);
-                    cairo_arc(cr, cx, cy, rad, 0, 6.28318);
-                    cairo_fill(cr);
-                    cairo_set_source_rgb(cr, 1.0, 1.0, 1.0);
+                if (!drawPieceImage(cr, p, L.boardX + vf * L.cell, L.boardY + vr * L.cell, L.cell)) {
+                    double cx = L.boardX + vf * L.cell + L.cell / 2.0;
+                    double cy = L.boardY + vr * L.cell + L.cell / 2.0;
+                    double rad = L.cell * 0.36;
+                    if (is_white_piece(p)) {
+                        cairo_set_source_rgb(cr, 0.96, 0.96, 0.92);
+                        cairo_arc(cr, cx, cy, rad, 0, 6.28318);
+                        cairo_fill_preserve(cr);
+                        cairo_set_source_rgb(cr, 0.0, 0.0, 0.0);
+                        cairo_set_line_width(cr, 2.0);
+                        cairo_stroke(cr);
+                        cairo_set_source_rgb(cr, 0.0, 0.0, 0.0);
+                    } else {
+                        cairo_set_source_rgb(cr, 0.03, 0.03, 0.03);
+                        cairo_arc(cr, cx, cy, rad, 0, 6.28318);
+                        cairo_fill(cr);
+                        cairo_set_source_rgb(cr, 1.0, 1.0, 1.0);
+                    }
+                    drawTextCentered(cr, pieceLetter(p), L.boardX + vf * L.cell, L.boardY + vr * L.cell + 2, L.cell, L.cell, L.cell * 0.46, true);
                 }
-                drawTextCentered(cr, pieceLetter(p), boardX + vf * cell, boardY + vr * cell + 2, cell, cell, cell * 0.46, true);
             }
         }
     }
 
+    drawCoordinates(cr, L);
+
     cairo_set_source_rgb(cr, 0.0, 0.0, 0.0);
     cairo_set_line_width(cr, 2.0);
-    cairo_rectangle(cr, boardX, boardY, board, board);
+    cairo_rectangle(cr, L.boardX, L.boardY, L.board, L.board);
     cairo_stroke(cr);
 
-    std::string status = app.uiStatus.empty() ? app.game.status() : app.uiStatus;
+    drawMovePanel(cr, L);
+
+    std::string status = app.resigned ? app.resignedMessage : (app.uiStatus.empty() ? app.game.status() : app.uiStatus);
     cairo_set_source_rgb(cr, 0.0, 0.0, 0.0);
-    drawTextCentered(cr, status, margin, H - statusH + 2, W - 2 * margin, statusH / 2.0, 18, true);
-    std::string fen = app.game.fen();
-    if (fen.size() > 92) fen = fen.substr(0, 92) + "...";
-    drawTextCentered(cr, fen, margin, H - statusH / 2.0, W - 2 * margin, statusH / 2.0, 11, false);
+    drawTextCentered(cr, status, L.margin, H - L.statusH + 6, W - 2 * L.margin, L.statusH * 0.58, app.uiFontSize + 2, true);
+    drawTextCentered(cr, moveSummaryLine(), L.margin, H - L.statusH + L.statusH * 0.58, W - 2 * L.margin, L.statusH * 0.36, std::max(12, app.uiFontSize - 7), false);
 
     if (app.pendingFrom >= 0) {
-        double ox = boardX + board * 0.1;
-        double oy = boardY + board * 0.36;
-        double ow = board * 0.8;
-        double oh = board * 0.28;
+        double ox = L.boardX + L.board * 0.1;
+        double oy = L.boardY + L.board * 0.36;
+        double ow = L.board * 0.8;
+        double oh = std::max(190.0, L.board * 0.28);
         cairo_set_source_rgb(cr, 0.92, 0.92, 0.90);
         cairo_rectangle(cr, ox, oy, ow, oh);
         cairo_fill_preserve(cr);
         cairo_set_source_rgb(cr, 0.0, 0.0, 0.0);
         cairo_set_line_width(cr, 3.0);
         cairo_stroke(cr);
-        drawTextCentered(cr, "Promote to", ox, oy + 8, ow, 30, 18, true);
+        drawTextCentered(cr, "Promote to", ox, oy + 8, ow, 38, app.uiFontSize, true);
         const char* opts[4] = {"Q", "R", "B", "N"};
         for (int i = 0; i < 4; ++i) {
             double x = ox + 18 + i * (ow - 36) / 4.0;
-            double y = oy + 48;
+            double y = oy + 58;
             double w = (ow - 52) / 4.0;
-            double h = oh - 66;
+            double h = oh - 76;
             cairo_rectangle(cr, x, y, w, h);
             cairo_stroke(cr);
-            drawTextCentered(cr, opts[i], x, y, w, h, 30, true);
+            drawTextCentered(cr, opts[i], x, y, w, h, std::max(30, app.uiFontSize + 8), true);
         }
     }
+
+    if (app.confirmNew) drawConfirmNew(cr, L);
+    else if (app.showSettings) drawSettings(cr, L);
 
     cairo_destroy(cr);
     return FALSE;
@@ -807,19 +1204,10 @@ static void maybeEngineMove() {
 }
 
 static int boardSquareFromXY(GtkWidget* widget, int x, int y) {
-    GtkAllocation a;
-    gtk_widget_get_allocation(widget, &a);
-    int W = a.width, H = a.height;
-    int topH = 58, statusH = 56, margin = 8;
-    int boardMax = std::min(W - 2 * margin, H - topH - statusH - 2 * margin);
-    int board = boardMax - (boardMax % 8);
-    if (board < 240) board = boardMax;
-    int boardX = (W - board) / 2;
-    int boardY = topH + ((H - topH - statusH - board) / 2);
-    if (x < boardX || x >= boardX + board || y < boardY || y >= boardY + board) return -1;
-    int cell = board / 8;
-    int vf = (x - boardX) / cell;
-    int vr = (y - boardY) / cell;
+    Layout L = computeLayout(widget);
+    if (x < L.boardX || x >= L.boardX + L.board || y < L.boardY || y >= L.boardY + L.board) return -1;
+    int vf = (x - L.boardX) / L.cell;
+    int vr = (y - L.boardY) / L.cell;
     int br = app.flipped ? 7 - vr : vr;
     int bf = app.flipped ? 7 - vf : vf;
     return sq(br, bf);
@@ -827,26 +1215,20 @@ static int boardSquareFromXY(GtkWidget* widget, int x, int y) {
 
 static bool handlePromotionTap(GtkWidget* widget, int x, int y) {
     if (app.pendingFrom < 0) return false;
-    GtkAllocation a;
-    gtk_widget_get_allocation(widget, &a);
-    int W = a.width, H = a.height;
-    int topH = 58, statusH = 56, margin = 8;
-    int boardMax = std::min(W - 2 * margin, H - topH - statusH - 2 * margin);
-    int board = boardMax - (boardMax % 8);
-    if (board < 240) board = boardMax;
-    int boardX = (W - board) / 2;
-    int boardY = topH + ((H - topH - statusH - board) / 2);
-    double ox = boardX + board * 0.1;
-    double oy = boardY + board * 0.36;
-    double ow = board * 0.8;
-    double oh = board * 0.28;
+    Layout L = computeLayout(widget);
+    double ox = L.boardX + L.board * 0.1;
+    double oy = L.boardY + L.board * 0.36;
+    double ow = L.board * 0.8;
+    double oh = std::max(190.0, L.board * 0.28);
     const char promos[4] = {'q','r','b','n'};
     for (int i = 0; i < 4; ++i) {
         double bx = ox + 18 + i * (ow - 36) / 4.0;
-        double by = oy + 48;
+        double by = oy + 58;
         double bw = (ow - 52) / 4.0;
-        double bh = oh - 66;
+        double bh = oh - 76;
         if (x >= bx && x <= bx + bw && y >= by && y <= by + bh) {
+            app.resigned = false;
+            app.resignedMessage.clear();
             app.game.makeMove(app.pendingFrom, app.pendingTo, promos[i]);
             app.game.save();
             app.pendingFrom = app.pendingTo = -1;
@@ -859,36 +1241,126 @@ static bool handlePromotionTap(GtkWidget* widget, int x, int y) {
     return true;
 }
 
+static bool pointInButton(const RectButton& b, int x, int y) {
+    return x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h;
+}
+
+static void startNewGameNow() {
+    app.uiStatus.clear();
+    app.resigned = false;
+    app.resignedMessage.clear();
+    app.confirmNew = false;
+    app.showSettings = false;
+    app.game.reset();
+    app.selected = -1;
+    app.pendingFrom = app.pendingTo = -1;
+    app.game.save();
+}
+
+static bool handleConfirmTap(int x, int y) {
+    if (!app.confirmNew) return false;
+    for (const auto& b : app.overlayButtons) {
+        if (!pointInButton(b, x, y)) continue;
+        if (b.label == "Cancel") app.confirmNew = false;
+        else if (b.label == "New Game") startNewGameNow();
+        gtk_widget_queue_draw(app.area);
+        return true;
+    }
+    return true;
+}
+
+static void setFontFromSliderX(int x) {
+    int rel = clampInt(x - app.sliderX, 0, app.sliderW);
+    double t = app.sliderW > 0 ? (double)rel / (double)app.sliderW : 0.5;
+    app.uiFontSize = clampInt((int)(14 + t * 20 + 0.5), 14, 34);
+    saveAppSettings();
+}
+
+static bool handleSettingsTap(int x, int y) {
+    if (!app.showSettings) return false;
+    if (x >= app.sliderX - 12 && x <= app.sliderX + app.sliderW + 12 &&
+        y >= app.sliderY - 8 && y <= app.sliderY + app.sliderH + 8) {
+        setFontFromSliderX(x);
+        gtk_widget_queue_draw(app.area);
+        return true;
+    }
+    for (const auto& b : app.overlayButtons) {
+        if (!pointInButton(b, x, y)) continue;
+        if (b.label.rfind("Coordinates", 0) == 0) app.showCoordinates = !app.showCoordinates;
+        else if (b.label.rfind("Move List", 0) == 0) app.showMoveList = !app.showMoveList;
+        else if (b.label == "A-") app.uiFontSize = clampInt(app.uiFontSize - 2, 14, 34);
+        else if (b.label == "A+") app.uiFontSize = clampInt(app.uiFontSize + 2, 14, 34);
+        else if (b.label.rfind("Piece PNGs", 0) == 0) app.usePieceImages = !app.usePieceImages;
+        else if (b.label == "Reload PNGs") {
+            freePieceImages();
+            loadPieceImages();
+            app.uiStatus = haveAllPieceImages() ? "Piece PNGs loaded." : "Some piece PNGs are missing; using fallback letters.";
+        } else if (b.label == "Close Settings") app.showSettings = false;
+        saveAppSettings();
+        gtk_widget_queue_draw(app.area);
+        return true;
+    }
+    return true;
+}
+
 static void clickButton(const std::string& label) {
     app.uiStatus.clear();
+    bool runEngineAfter = false;
     if (label == "New") {
-        app.game.reset(); app.selected = -1; app.pendingFrom = app.pendingTo = -1; app.game.save();
+        app.confirmNew = true;
+        app.showSettings = false;
+        app.overlayButtons.clear();
     } else if (label == "Undo") {
+        app.resigned = false;
+        app.resignedMessage.clear();
         app.game.undo(); app.game.save(); app.selected = -1;
         if (engineShouldMove()) { app.game.undo(); app.game.save(); }
     } else if (label == "Flip") {
         app.flipped = !app.flipped;
+        saveAppSettings();
+    } else if (label == "Resign") {
+        app.resigned = true;
+        app.resignedMessage = std::string(app.game.whiteToMove() ? "White" : "Black") + " resigned.";
+        app.selected = -1;
+        app.pendingFrom = app.pendingTo = -1;
+    } else if (label == "Settings") {
+        app.showSettings = true;
+        app.confirmNew = false;
+        app.overlayButtons.clear();
     } else if (label.rfind("Engine", 0) == 0) {
         if (app.engineMode == EngineMode::Off) app.engineMode = EngineMode::Black;
         else if (app.engineMode == EngineMode::Black) app.engineMode = EngineMode::White;
         else app.engineMode = EngineMode::Off;
+        runEngineAfter = true;
     } else if (label.rfind("Level", 0) == 0) {
         app.levelIndex = (app.levelIndex + 1) % (int)app.movetimes.size();
+    } else if (label == "Exit") {
+        app.game.save();
+        saveAppSettings();
+        app.engine.stop();
+        freePieceImages();
+        gtk_main_quit();
+        return;
     }
     gtk_widget_queue_draw(app.area);
-    maybeEngineMove();
+    if (runEngineAfter) maybeEngineMove();
 }
 
 static gboolean on_button(GtkWidget* widget, GdkEventButton* ev, gpointer) {
     if (ev->button != 1) return FALSE;
     int x = (int)ev->x, y = (int)ev->y;
+
+    if (handleConfirmTap(x, y)) return TRUE;
+    if (handleSettingsTap(x, y)) return TRUE;
     if (handlePromotionTap(widget, x, y)) return TRUE;
+
     for (const auto& b : app.buttons) {
-        if (x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h) {
+        if (pointInButton(b, x, y)) {
             clickButton(b.label);
             return TRUE;
         }
     }
+    if (app.resigned) return TRUE;
     if (engineShouldMove()) return TRUE;
     int s = boardSquareFromXY(widget, x, y);
     if (s < 0) return FALSE;
@@ -904,6 +1376,8 @@ static gboolean on_button(GtkWidget* widget, GdkEventButton* ev, gpointer) {
                 app.pendingFrom = app.selected;
                 app.pendingTo = s;
             } else if (app.game.makeMove(app.selected, s)) {
+                app.resigned = false;
+                app.resignedMessage.clear();
                 app.game.save();
                 app.selected = -1;
                 gtk_widget_queue_draw(app.area);
@@ -917,7 +1391,9 @@ static gboolean on_button(GtkWidget* widget, GdkEventButton* ev, gpointer) {
 
 static gboolean on_delete(GtkWidget*, GdkEvent*, gpointer) {
     app.game.save();
+    saveAppSettings();
     app.engine.stop();
+    freePieceImages();
     gtk_main_quit();
     return TRUE;
 }
@@ -931,6 +1407,7 @@ int main(int argc, char** argv) {
     }
 
     gtk_init(&argc, &argv);
+    loadAppSettings();
     app.game.load();
 
     app.window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
