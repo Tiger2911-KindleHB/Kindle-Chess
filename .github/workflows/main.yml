@@ -22,11 +22,12 @@ jobs:
 
     steps:
       - name: Check out source
-        uses: actions/checkout@v6
+        uses: actions/checkout@v5
 
       - name: Install build dependencies
         run: |
           set -euxo pipefail
+
           sudo apt-get update
           sudo apt-get install -y \
             build-essential autoconf automake bison flex gawk \
@@ -37,17 +38,23 @@ jobs:
       - name: Download prebuilt Kindle toolchain
         run: |
           set -euxo pipefail
+
           cd "$HOME"
           mkdir -p "$HOME/x-tools"
+
           curl -fL \
             -o "/tmp/${TARGET}.tar.gz" \
             "https://github.com/koreader/koxtoolchain/releases/download/${KOX_RELEASE}/${TARGET}.tar.gz"
+
           tar -xzf "/tmp/${TARGET}.tar.gz" -C "$HOME"
-          find "$HOME/x-tools" -maxdepth 3 -type d | sort
+
+          echo "Toolchains found:"
+          find "$HOME/x-tools" -maxdepth 4 -type d | sort
 
       - name: Install Kindle SDK
         run: |
           set -euxo pipefail
+
           git clone --recursive --depth=1 https://github.com/KindleModding/kindle-sdk.git /tmp/kindle-sdk
           cd /tmp/kindle-sdk
           chmod +x ./gen-sdk.sh
@@ -56,16 +63,20 @@ jobs:
       - name: Locate Kindle cross file and compiler
         run: |
           set -euxo pipefail
+
+          echo "Searching for Meson cross file..."
           CROSS_FILE="$(find "$HOME/x-tools" -name meson-crosscompile.txt | head -n 1)"
           test -f "$CROSS_FILE"
           echo "CROSS_FILE=$CROSS_FILE" >> "$GITHUB_ENV"
           echo "Using cross file: $CROSS_FILE"
 
+          echo "Searching for Kindle C++ compiler..."
           CXX_COMPILER="$(find "$HOME/x-tools" -type f \( -name '*g++' -o -name '*c++' \) | grep '/bin/' | head -n 1)"
           test -x "$CXX_COMPILER"
           echo "KINDLE_CXX=$CXX_COMPILER" >> "$GITHUB_ENV"
           echo "Using Kindle C++ compiler: $CXX_COMPILER"
 
+          echo "Searching for Kindle strip tool..."
           STRIPPER="$(find "$HOME/x-tools" -type f -name '*strip' | grep '/bin/' | head -n 1 || true)"
           echo "KINDLE_STRIP=$STRIPPER" >> "$GITHUB_ENV"
           echo "Using strip tool: $STRIPPER"
@@ -73,53 +84,73 @@ jobs:
       - name: Build KindleChess app
         run: |
           set -euxo pipefail
+
           rm -rf builddir_kindlehf
+
           meson setup --cross-file "$CROSS_FILE" builddir_kindlehf
           meson compile -C builddir_kindlehf
+
           file builddir_kindlehf/kindlechess
 
       - name: Build Stockfish for Kindle
         run: |
           set -euxo pipefail
+
           git clone --depth=1 --branch "$STOCKFISH_TAG" https://github.com/official-stockfish/Stockfish.git /tmp/Stockfish
+
           cd /tmp/Stockfish/src
+
           make clean
 
-          # Use the safest generic 32-bit target for Kindle compatibility. It is slower than armv7,
-          # but avoids CPU-feature crashes on unknown Kindle hardware.
+          echo "Building Stockfish ${STOCKFISH_TAG} for Kindle ARMv7..."
+
           make -j"$(nproc)" build \
-            ARCH=general-32 \
+            ARCH=armv7 \
             COMP=gcc \
             COMPCXX="$KINDLE_CXX"
 
           file stockfish
+
           if [ -n "${KINDLE_STRIP:-}" ] && [ -x "$KINDLE_STRIP" ]; then
             "$KINDLE_STRIP" stockfish || true
           fi
+
           install -m 0755 stockfish /tmp/stockfish-kindle
           file /tmp/stockfish-kindle
 
       - name: Package KUAL extension
         run: |
           set -euxo pipefail
+
           chmod +x scripts/package-kual.sh
           chmod +x extension/kindlechess/bin/start.sh
+
           ./scripts/package-kual.sh ./builddir_kindlehf/kindlechess
+
           install -m 0755 /tmp/stockfish-kindle dist/kindlechess/bin/stockfish
+
           mkdir -p dist/kindlechess/licenses
+
           if [ -f /tmp/Stockfish/Copying.txt ]; then
             cp /tmp/Stockfish/Copying.txt dist/kindlechess/licenses/Stockfish-GPLv3-Copying.txt
           fi
+
           if [ -f /tmp/Stockfish/AUTHORS ]; then
             cp /tmp/Stockfish/AUTHORS dist/kindlechess/licenses/Stockfish-AUTHORS.txt
           fi
+
           cd dist
           rm -f kindlechess-kual.zip
           zip -r kindlechess-kual.zip kindlechess
-          ls -lh kindlechess-kual.zip kindlechess/bin/
+
+          echo "Final package:"
+          ls -lh kindlechess-kual.zip
+
+          echo "Final binary folder:"
+          ls -lh kindlechess/bin/
 
       - name: Upload KUAL zip
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v6
         with:
           name: kindlechess-kual
           path: dist/kindlechess-kual.zip
