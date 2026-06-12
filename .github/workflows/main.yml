@@ -1,0 +1,58 @@
+name: Build KindleChess for Kindle
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+      - master
+
+jobs:
+  build:
+    name: Build KUAL package
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install host packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential autoconf automake bison flex gawk \
+            libtool libtool-bin libncurses-dev curl file git gperf \
+            help2man texinfo unzip wget sed libarchive-dev nettle-dev \
+            meson ninja-build zip python3 python3-pip pkg-config
+
+      - name: Download prebuilt kindlehf toolchain
+        run: |
+          cd "$HOME"
+          mkdir -p x-tools
+          wget -O kindlehf.tar.gz https://github.com/koreader/koxtoolchain/releases/download/2024.04/kindlehf.tar.gz
+          tar -xzf kindlehf.tar.gz -C "$HOME"
+
+      - name: Install Kindle SDK
+        run: |
+          cd "$HOME"
+          git clone --recursive --depth=1 https://github.com/KindleModding/kindle-sdk.git
+          cd kindle-sdk
+          chmod +x ./gen-sdk.sh
+          ./gen-sdk.sh kindlehf
+
+      - name: Build KindleChess
+        run: |
+          meson setup --cross-file "$HOME/x-tools/kindlehf/meson-crosscompile.txt" builddir_kindlehf
+          meson compile -C builddir_kindlehf
+
+      - name: Package KUAL extension
+        run: |
+          chmod +x scripts/package-kual.sh
+          chmod +x extension/kindlechess/bin/start.sh
+          ./scripts/package-kual.sh ./builddir_kindlehf/kindlechess
+
+      - name: Upload KUAL zip
+        uses: actions/upload-artifact@v4
+        with:
+          name: kindlechess-kual
+          path: dist/kindlechess-kual.zip
