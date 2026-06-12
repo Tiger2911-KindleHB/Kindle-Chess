@@ -1515,7 +1515,9 @@ static void drawToolbar(cairo_t* cr, int W) {
 }
 
 static int capturedLabelWidth() {
-    return std::max(190, std::min(310, app.uiFontSize * 6));
+    // Reserve a wider label area so captured-piece icons do not sit tight
+    // against the text at large Kindle-friendly font sizes.
+    return std::max(260, std::min(430, app.uiFontSize * 8));
 }
 
 static int fitCapturedCell(int availableW, int requestedCell, int maxPieces) {
@@ -1538,7 +1540,7 @@ static void drawCapturedRow(cairo_t* cr, const std::string& label, const std::ve
         }
         px += cell + 3;
     }
-    if (pieces.empty()) drawTextLeft(cr, "None", px, y + fs + 3, fs, false);
+    // Intentionally leave the row blank when nothing has been captured.
 }
 
 static void drawCapturedBox(cairo_t* cr, int x, int y, int w, int h) {
@@ -1565,8 +1567,8 @@ static void drawCapturedPieces(cairo_t* cr, const Layout& L) {
         cairo_set_source_rgb(cr, 0.0, 0.0, 0.0);
         drawTextCentered(cr, "Captured", L.panelX + 8, y + 8, L.panelW - 16, fs + 8, fs, true);
         int rowY = y + fs + 24;
-        drawCapturedRow(cr, "White:", caps.first, L.panelX + 14, rowY, L.panelW - 28, cell, fs);
-        drawCapturedRow(cr, "Black:", caps.second, L.panelX + 14, rowY + cell + rowGap, L.panelW - 28, cell, fs);
+        drawCapturedRow(cr, "White captured", caps.first, L.panelX + 14, rowY, L.panelW - 28, cell, fs);
+        drawCapturedRow(cr, "Black captured", caps.second, L.panelX + 14, rowY + cell + rowGap, L.panelW - 28, cell, fs);
     } else {
         int areaTop = L.boardY + L.board + 8;
         int areaBottom = L.H - L.statusH - 8;
@@ -1582,8 +1584,8 @@ static void drawCapturedPieces(cairo_t* cr, const Layout& L) {
         drawCapturedBox(cr, L.boardX, boxY, L.board, boxH);
         cairo_set_source_rgb(cr, 0.0, 0.0, 0.0);
         int y = boxY + fs + 12;
-        drawCapturedRow(cr, "White captured:", caps.first, L.boardX + 12, y, L.board - 24, cell, fs);
-        drawCapturedRow(cr, "Black captured:", caps.second, L.boardX + 12, y + cell + rowGap, L.board - 24, cell, fs);
+        drawCapturedRow(cr, "White captured", caps.first, L.boardX + 12, y, L.board - 24, cell, fs);
+        drawCapturedRow(cr, "Black captured", caps.second, L.boardX + 12, y + cell + rowGap, L.board - 24, cell, fs);
     }
 }
 
@@ -1679,8 +1681,8 @@ static void drawSettingsMain(cairo_t* cr, const Layout& L, double ox, double oy,
 
     RectButton coords{std::string("Coordinates: ") + (app.showCoordinates ? "On" : "Off"), left, y, bw, bh};
     RectButton moves{std::string("Move List: ") + (app.showMoveList ? "On" : "Off"), right, y, bw, bh}; y += gap;
-    RectButton smaller{"A-", left, y, bw, bh};
-    RectButton bigger{"A+", right, y, bw, bh}; y += gap;
+    RectButton smaller{"Font -", left, y, bw, bh};
+    RectButton bigger{"Font +", right, y, bw, bh}; y += gap;
     RectButton pieceMode{std::string("Piece PNGs: ") + (app.usePieceImages ? "On" : "Off"), left, y, bw, bh};
     RectButton reloadPieces{"Reload PNGs", right, y, bw, bh}; y += gap;
     RectButton darkFix{std::string("Dark Piece Fix: ") + darkPieceModeLabel(), left, y, bw * 2 + 12, bh}; y += gap;
@@ -2174,8 +2176,8 @@ static bool handleSettingsTap(int x, int y) {
 
         if (b.label.rfind("Coordinates", 0) == 0) app.showCoordinates = !app.showCoordinates;
         else if (b.label.rfind("Move List", 0) == 0) app.showMoveList = !app.showMoveList;
-        else if (b.label == "A-") app.uiFontSize = clampInt(app.uiFontSize - 2, 14, 50);
-        else if (b.label == "A+") app.uiFontSize = clampInt(app.uiFontSize + 2, 14, 50);
+        else if (b.label == "Font -") app.uiFontSize = clampInt(app.uiFontSize - 2, 14, 50);
+        else if (b.label == "Font +") app.uiFontSize = clampInt(app.uiFontSize + 2, 14, 50);
         else if (b.label.rfind("Engine", 0) == 0 && !locked) {
             if (app.engineMode == EngineMode::Off) app.engineMode = EngineMode::Black;
             else if (app.engineMode == EngineMode::Black) app.engineMode = EngineMode::White;

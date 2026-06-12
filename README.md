@@ -125,7 +125,7 @@ Available settings/actions include:
 - **Review Game** — enters move-review mode
 - **Coordinates** — toggles board coordinate labels
 - **Move List** — toggles the move-history panel
-- **A- / A+** — adjusts UI font size
+- **Font - / Font +** — adjusts UI font size
 - **Piece PNGs** — toggles custom PNG chess pieces
 - **Reload PNGs** — reloads piece images from storage
 - **Dark Piece Fix** — Auto / Off / On piece inversion for Kindle dark mode
