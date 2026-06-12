@@ -245,3 +245,13 @@ Reload PNGs
 ```
 
 If a PNG is missing or invalid, the app falls back to built-in letter pieces for that specific piece.
+
+## Engine diagnostics
+
+If engine mode says `Engine did not answer uciok` or `readyok`, copy this file from the Kindle and inspect/send it:
+
+```text
+/mnt/us/extensions/kindlechess/data/engine.log
+```
+
+The app now waits longer for the first UCI handshake and records raw engine stdout/stderr to help diagnose incompatible Stockfish builds.

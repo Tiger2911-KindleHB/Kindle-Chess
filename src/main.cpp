@@ -18,6 +18,7 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/time.h>
+#include <sys/wait.h>
 #include <unistd.h>
 #include <vector>
 
@@ -57,8 +58,20 @@ static std::string home_dir() {
 }
 static std::string save_path() { return home_dir() + "/data/save.txt"; }
 static std::string settings_path() { return home_dir() + "/data/settings.txt"; }
+static std::string engine_log_path() { return home_dir() + "/data/engine.log"; }
 static std::string pieces_custom_dir() { return home_dir() + "/pieces/custom"; }
 static std::string pieces_default_dir() { return home_dir() + "/pieces/default"; }
+
+
+static void append_engine_log(const std::string& msg) {
+    std::string dir = home_dir() + "/data";
+    mkdir(dir.c_str(), 0755);
+    std::ofstream f(engine_log_path().c_str(), std::ios::app);
+    if (!f) return;
+    struct timeval tv{};
+    gettimeofday(&tv, nullptr);
+    f << "[" << tv.tv_sec << "." << tv.tv_usec << "] " << msg << "\n";
+}
 
 struct Move {
     int from = -1;
@@ -473,12 +486,15 @@ public:
 
     bool ensureStarted(const std::string& path, std::string& err) {
         if (child > 0) return true;
+        append_engine_log("--- engine start requested ---");
+        append_engine_log("path=" + path);
         if (!available(path)) {
             err = "No executable UCI engine found at " + path;
+            append_engine_log(err);
             return false;
         }
         int inpipe[2], outpipe[2];
-        if (pipe(inpipe) != 0 || pipe(outpipe) != 0) { err = "pipe() failed"; return false; }
+        if (pipe(inpipe) != 0 || pipe(outpipe) != 0) { err = "pipe() failed"; append_engine_log(err); return false; }
         child = fork();
         if (child == 0) {
             dup2(inpipe[0], STDIN_FILENO);
@@ -486,23 +502,26 @@ public:
             dup2(outpipe[1], STDERR_FILENO);
             close(inpipe[0]); close(inpipe[1]); close(outpipe[0]); close(outpipe[1]);
             execl(path.c_str(), path.c_str(), (char*)nullptr);
+            dprintf(STDERR_FILENO, "exec failed for %s: errno=%d %s\n", path.c_str(), errno, strerror(errno));
             _exit(127);
         }
         close(inpipe[0]); close(outpipe[1]);
         write_fd = inpipe[1]; read_fd = outpipe[0];
-        if (child < 0) { err = "fork() failed"; return false; }
+        if (child < 0) { err = "fork() failed"; append_engine_log(err); return false; }
+        append_engine_log("child pid=" + std::to_string((long long)child));
 
         sendLine("uci");
-        if (!waitForToken("uciok", 4000)) { err = "Engine did not answer uciok."; stop(); return false; }
+        if (!waitForToken("uciok", 20000)) { err = "Engine did not answer uciok. See data/engine.log."; append_engine_log(err); stop(); return false; }
         sendLine("setoption name Threads value 1");
         sendLine("setoption name Hash value 16");
         sendLine("setoption name Ponder value false");
         sendLine("setoption name MultiPV value 1");
         sendLine("isready");
-        if (!waitForToken("readyok", 4000)) { err = "Engine did not answer readyok."; stop(); return false; }
+        if (!waitForToken("readyok", 15000)) { err = "Engine did not answer readyok. See data/engine.log."; append_engine_log(err); stop(); return false; }
         sendLine("ucinewgame");
         sendLine("isready");
-        waitForToken("readyok", 4000);
+        waitForToken("readyok", 15000);
+        append_engine_log("engine initialized successfully");
         return true;
     }
 
@@ -521,6 +540,7 @@ public:
         long start = nowMs();
         while (nowMs() - start < timeout) {
             if (!readLine(line, 250)) continue;
+            append_engine_log("<< " + line);
             if (line.rfind("bestmove ", 0) == 0) {
                 std::istringstream ss(line);
                 std::string tag, mv;
@@ -528,15 +548,24 @@ public:
                 return mv == "(none)" ? "" : mv;
             }
         }
-        err = "Engine timed out waiting for bestmove.";
+        err = "Engine timed out waiting for bestmove. See data/engine.log.";
+        append_engine_log(err);
         return "";
     }
 
     void stop() {
         if (child > 0) {
+            append_engine_log("stopping engine pid=" + std::to_string((long long)child));
             sendLine("quit");
-            usleep(100000);
-            kill(child, SIGTERM);
+            waitForExit(500);
+            if (child > 0) {
+                kill(child, SIGTERM);
+                waitForExit(500);
+            }
+            if (child > 0) {
+                kill(child, SIGKILL);
+                waitForExit(500);
+            }
         }
         if (write_fd >= 0) close(write_fd);
         if (read_fd >= 0) close(read_fd);
@@ -555,8 +584,24 @@ private:
         return tv.tv_sec * 1000L + tv.tv_usec / 1000L;
     }
 
+    void waitForExit(int timeoutMs) {
+        if (child <= 0) return;
+        long end = nowMs() + timeoutMs;
+        while (nowMs() < end) {
+            int status = 0;
+            pid_t r = waitpid(child, &status, WNOHANG);
+            if (r == child) {
+                append_engine_log("engine exited status=" + std::to_string(status));
+                child = -1;
+                return;
+            }
+            usleep(50000);
+        }
+    }
+
     bool sendLine(const std::string& s) {
         if (write_fd < 0) return false;
+        append_engine_log(">> " + s);
         std::string out = s + "\n";
         return write(write_fd, out.c_str(), out.size()) == (ssize_t)out.size();
     }
@@ -572,7 +617,10 @@ private:
             if (r <= 0) continue;
             char c;
             ssize_t n = read(read_fd, &c, 1);
-            if (n <= 0) return false;
+            if (n <= 0) {
+                append_engine_log("engine pipe closed while reading");
+                return false;
+            }
             if (c == '\n') { line = partial; partial.clear(); return true; }
             if (c != '\r') partial.push_back(c);
         }
@@ -583,8 +631,12 @@ private:
         std::string line;
         long start = nowMs();
         while (nowMs() - start < timeoutMs) {
-            if (readLine(line, 250) && line.find(token) != std::string::npos) return true;
+            if (readLine(line, 250)) {
+                append_engine_log("<< " + line);
+                if (line.find(token) != std::string::npos) return true;
+            }
         }
+        append_engine_log("timeout waiting for token=" + token);
         return false;
     }
 };
