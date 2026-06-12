@@ -11,6 +11,8 @@
 #include <cstring>
 #include <fcntl.h>
 #include <fstream>
+#include <ctime>
+#include <map>
 #include <iostream>
 #include <sstream>
 #include <string>
@@ -59,6 +61,9 @@ static std::string home_dir() {
 static std::string save_path() { return home_dir() + "/data/save.txt"; }
 static std::string settings_path() { return home_dir() + "/data/settings.txt"; }
 static std::string engine_log_path() { return home_dir() + "/data/engine.log"; }
+static std::string games_dir() { return home_dir() + "/data/games"; }
+static std::string slots_dir() { return home_dir() + "/data/slots"; }
+static std::string slot_path(int n) { return slots_dir() + "/slot" + std::to_string(n) + ".txt"; }
 static std::string pieces_custom_dir() { return home_dir() + "/pieces/custom"; }
 static std::string pieces_default_dir() { return home_dir() + "/pieces/default"; }
 
@@ -207,7 +212,11 @@ public:
     void save() const {
         std::string dir = home_dir() + "/data";
         mkdir(dir.c_str(), 0755);
-        std::ofstream f(save_path().c_str());
+        saveTo(save_path());
+    }
+
+    void saveTo(const std::string& path) const {
+        std::ofstream f(path.c_str());
         if (!f) return;
         f << "KINDLECHESS 1\n";
         f << "moves=";
@@ -218,8 +227,10 @@ public:
         f << "\n";
     }
 
-    bool load() {
-        std::ifstream f(save_path().c_str());
+    bool load() { return loadFrom(save_path()); }
+
+    bool loadFrom(const std::string& path) {
+        std::ifstream f(path.c_str());
         if (!f) return false;
         std::string line, movesLine;
         std::getline(f, line);
@@ -243,6 +254,109 @@ public:
         return any;
     }
 
+    Position positionAfterPly(int ply) const {
+        ChessGame tmp;
+        tmp.reset();
+        int n = clampIntLocal(ply, 0, (int)pos.uci_moves.size());
+        for (int i = 0; i < n; ++i) tmp.makeUciMove(pos.uci_moves[i]);
+        return tmp.pos;
+    }
+
+    std::string sanForUci(const std::string& uci) const {
+        if (uci.size() < 4) return uci;
+        int from = parse_square(uci.substr(0, 2));
+        int to = parse_square(uci.substr(2, 2));
+        char promo = uci.size() >= 5 ? (char)std::tolower((unsigned char)uci[4]) : 0;
+        for (const auto& m : legalMoves()) {
+            if (m.from != from || m.to != to) continue;
+            if (m.promotion && promo && m.promotion != promo) continue;
+            if (m.promotion && !promo) continue;
+            return sanForMove(m);
+        }
+        return uci;
+    }
+
+    std::vector<std::string> sanMoveList() const {
+        std::vector<std::string> out;
+        ChessGame tmp;
+        tmp.reset();
+        for (const auto& u : pos.uci_moves) {
+            out.push_back(tmp.sanForUci(u));
+            tmp.makeUciMove(u);
+        }
+        return out;
+    }
+
+    std::pair<std::vector<char>, std::vector<char>> capturedPieces() const {
+        std::vector<char> byWhite, byBlack;
+        ChessGame tmp;
+        tmp.reset();
+        for (const auto& u : pos.uci_moves) {
+            if (u.size() < 4) break;
+            int from = parse_square(u.substr(0,2));
+            int to = parse_square(u.substr(2,2));
+            char promo = u.size() >= 5 ? (char)std::tolower((unsigned char)u[4]) : 0;
+            bool found = false;
+            for (const auto& m : tmp.legalMoves()) {
+                if (m.from != from || m.to != to) continue;
+                if (m.promotion && promo && m.promotion != promo) continue;
+                if (m.promotion && !promo) continue;
+                char moving = tmp.pos.b[m.from];
+                char captured = tmp.capturedPieceForMove(m);
+                if (captured != '.') {
+                    if (is_white_piece(moving)) byWhite.push_back(captured);
+                    else byBlack.push_back(captured);
+                }
+                tmp.applyNoHistory(m);
+                tmp.pos.uci_moves.push_back(u);
+                found = true;
+                break;
+            }
+            if (!found) break;
+        }
+        sortCaptured(byWhite);
+        sortCaptured(byBlack);
+        return {byWhite, byBlack};
+    }
+
+    bool isInsufficientMaterial() const {
+        std::vector<std::pair<char,int>> pieces;
+        for (int i = 0; i < 64; ++i) {
+            char p = pos.b[i];
+            if (p == '.' || piece_type(p) == 'k') continue;
+            pieces.push_back({p, i});
+        }
+        if (pieces.empty()) return true;
+        if (pieces.size() == 1) {
+            char t = piece_type(pieces[0].first);
+            return t == 'b' || t == 'n';
+        }
+        bool allBishops = true;
+        int color = -1;
+        for (auto& pi : pieces) {
+            if (piece_type(pi.first) != 'b') { allBishops = false; break; }
+            int c = (row_of(pi.second) + file_of(pi.second)) & 1;
+            if (color < 0) color = c;
+            else if (c != color) allBishops = false;
+        }
+        return allBishops;
+    }
+
+    bool isFiftyMoveDraw() const { return pos.halfmove_clock >= 100; }
+
+    bool isThreefoldRepetition() const {
+        std::map<std::string, int> seen;
+        ChessGame tmp;
+        tmp.reset();
+        seen[tmp.positionKey(tmp.pos)]++;
+        for (const auto& u : pos.uci_moves) {
+            if (!tmp.makeUciMove(u)) break;
+            seen[tmp.positionKey(tmp.pos)]++;
+            if (seen[tmp.positionKey(tmp.pos)] >= 3) return true;
+        }
+        return false;
+    }
+
     bool isCheckmate() const {
         auto moves = legalMoves();
         if (!moves.empty()) return false;
@@ -258,15 +372,123 @@ public:
     }
 
     std::string gameOverMessage() const {
-        if (isCheckmate()) return std::string(pos.white_to_move ? "Black" : "White") + " has won by checkmate.";
+        if (isCheckmate()) return std::string(pos.white_to_move ? "Black" : "White") + " wins by checkmate.";
         if (isStalemate()) return "Draw by stalemate.";
+        if (isInsufficientMaterial()) return "Draw by insufficient material.";
+        if (isFiftyMoveDraw()) return "Draw by fifty-move rule.";
+        if (isThreefoldRepetition()) return "Draw by threefold repetition.";
         return "";
+    }
+
+    std::string resultString() const {
+        if (isCheckmate()) return pos.white_to_move ? "0-1" : "1-0";
+        if (isStalemate() || isInsufficientMaterial() || isFiftyMoveDraw() || isThreefoldRepetition()) return "1/2-1/2";
+        return "*";
     }
 
 private:
     Position pos;
     std::vector<Position> history;
     std::string message;
+
+    static int clampIntLocal(int v, int lo, int hi) { return std::max(lo, std::min(hi, v)); }
+
+    static int pieceSortValue(char p) {
+        switch (piece_type(p)) {
+            case 'q': return 0;
+            case 'r': return 1;
+            case 'b': return 2;
+            case 'n': return 3;
+            case 'p': return 4;
+        }
+        return 5;
+    }
+
+    static void sortCaptured(std::vector<char>& v) {
+        std::sort(v.begin(), v.end(), [](char a, char b) {
+            int va = pieceSortValue(a), vb = pieceSortValue(b);
+            if (va != vb) return va < vb;
+            return a < b;
+        });
+    }
+
+    char capturedPieceForMove(const Move& m) const {
+        char moving = pos.b[m.from];
+        if (m.en_passant) {
+            int cap = is_white_piece(moving) ? m.to + 8 : m.to - 8;
+            if (cap >= 0 && cap < 64) return pos.b[cap];
+            return '.';
+        }
+        return pos.b[m.to];
+    }
+
+    std::string positionKey(const Position& p) const {
+        std::string k;
+        k.reserve(90);
+        for (char c : p.b) k.push_back(c);
+        k.push_back(p.white_to_move ? 'w' : 'b');
+        k.push_back(p.castle_wk ? 'K' : '-');
+        k.push_back(p.castle_wq ? 'Q' : '-');
+        k.push_back(p.castle_bk ? 'k' : '-');
+        k.push_back(p.castle_bq ? 'q' : '-');
+        if (p.ep_square >= 0) k += square_name(p.ep_square);
+        else k += "--";
+        return k;
+    }
+
+    std::string sanForMove(const Move& m) const {
+        char moving = pos.b[m.from];
+        bool white = is_white_piece(moving);
+        char t = piece_type(moving);
+        if (t == 'k' && m.castle) return m.to > m.from ? "O-O" : "O-O-O";
+
+        bool capture = capturedPieceForMove(m) != '.';
+        std::string san;
+        if (t != 'p') {
+            char letter = ' ';
+            if (t == 'n') letter = 'N';
+            else if (t == 'b') letter = 'B';
+            else if (t == 'r') letter = 'R';
+            else if (t == 'q') letter = 'Q';
+            else if (t == 'k') letter = 'K';
+            san.push_back(letter);
+
+            bool sameFile = false, sameRank = false, needDisambig = false;
+            for (const auto& other : legalMoves()) {
+                if (other.from == m.from || other.to != m.to) continue;
+                char op = pos.b[other.from];
+                if (op == '.' || is_white_piece(op) != white || piece_type(op) != t) continue;
+                needDisambig = true;
+                if (file_of(other.from) == file_of(m.from)) sameFile = true;
+                if (row_of(other.from) == row_of(m.from)) sameRank = true;
+            }
+            if (needDisambig) {
+                if (!sameFile) san.push_back((char)('a' + file_of(m.from)));
+                else if (!sameRank) san.push_back((char)('8' - row_of(m.from)));
+                else {
+                    san.push_back((char)('a' + file_of(m.from)));
+                    san.push_back((char)('8' - row_of(m.from)));
+                }
+            }
+        } else if (capture) {
+            san.push_back((char)('a' + file_of(m.from)));
+        }
+
+        if (capture) san.push_back('x');
+        san += square_name(m.to);
+        if (m.promotion) {
+            san += '=';
+            san.push_back((char)std::toupper((unsigned char)m.promotion));
+        }
+
+        ChessGame after = *this;
+        after.applyNoHistory(m);
+        int k = after.kingSquare(after.pos.white_to_move);
+        bool inCheck = k >= 0 && after.isSquareAttacked(k, !after.pos.white_to_move);
+        if (inCheck) san += after.legalMoves().empty() ? "#" : "+";
+        return san;
+    }
+
 
     bool enemyAt(int s, bool white) const {
         char p = pos.b[s];
@@ -696,11 +918,25 @@ struct App {
     int pendingTo = -1;
 
     bool showSettings = false;
+    int settingsPage = 0; // 0 main, 1 save/load
     bool confirmNew = false;
     bool showGameOver = false;
     std::string gameOverText;
     bool resigned = false;
     std::string resignedMessage;
+
+    bool confirmMoves = false;
+    bool showMoveConfirm = false;
+    int confirmFrom = -1;
+    int confirmTo = -1;
+    char confirmPromotion = 0;
+
+    bool reviewMode = false;
+    int reviewPly = 0;
+    std::vector<RectButton> reviewButtons;
+
+    int hintFrom = -1;
+    int hintTo = -1;
 
     bool showCoordinates = true;
     bool showMoveList = true;
@@ -723,6 +959,34 @@ static void ensure_data_dir() {
     mkdir(dir.c_str(), 0755);
 }
 
+static void ensure_games_dir() {
+    ensure_data_dir();
+    mkdir(games_dir().c_str(), 0755);
+}
+
+static void ensure_slots_dir() {
+    ensure_data_dir();
+    mkdir(slots_dir().c_str(), 0755);
+}
+
+static std::string nowTimestampForFile() {
+    std::time_t t = std::time(nullptr);
+    std::tm* tm = std::localtime(&t);
+    char buf[64];
+    if (tm) std::strftime(buf, sizeof(buf), "%Y%m%d-%H%M%S", tm);
+    else std::snprintf(buf, sizeof(buf), "%ld", (long)t);
+    return buf;
+}
+
+static std::string todayForPGN() {
+    std::time_t t = std::time(nullptr);
+    std::tm* tm = std::localtime(&t);
+    char buf[32];
+    if (tm) std::strftime(buf, sizeof(buf), "%Y.%m.%d", tm);
+    else std::snprintf(buf, sizeof(buf), "????.??.??");
+    return buf;
+}
+
 static void saveAppSettings() {
     ensure_data_dir();
     std::ofstream f(settings_path().c_str());
@@ -735,6 +999,7 @@ static void saveAppSettings() {
     f << "engine_elo=" << app.engineElos[app.engineEloIndex] << "\n";
     f << "flipped=0\n";
     f << "use_piece_images=" << (app.usePieceImages ? 1 : 0) << "\n";
+    f << "confirm_moves=" << (app.confirmMoves ? 1 : 0) << "\n";
 }
 
 static void loadAppSettings() {
@@ -759,6 +1024,7 @@ static void loadAppSettings() {
         }
         else if (key == "flipped") app.flipped = false;
         else if (key == "use_piece_images") app.usePieceImages = n != 0;
+        else if (key == "confirm_moves") app.confirmMoves = n != 0;
     }
 }
 
@@ -769,6 +1035,8 @@ static std::string engine_path() {
 }
 
 static bool engineShouldMove() {
+    if (app.reviewMode) return false;
+    if (app.showMoveConfirm) return false;
     if (app.resigned) return false;
     if (app.engineMode == EngineMode::Off) return false;
     if (app.game.whiteToMove() && app.engineMode == EngineMode::White) return true;
@@ -803,6 +1071,7 @@ static bool updateGameOverPopup() {
         app.gameOverText = msg;
         app.selected = -1;
         app.pendingFrom = app.pendingTo = -1;
+        app.showMoveConfirm = false;
         return true;
     }
     app.showGameOver = false;
@@ -810,6 +1079,83 @@ static bool updateGameOverPopup() {
     return false;
 }
 
+static std::string exportPGN() {
+    ensure_games_dir();
+    std::string file = games_dir() + "/game-" + nowTimestampForFile() + ".pgn";
+    std::ofstream f(file.c_str());
+    if (!f) return "Could not export PGN.";
+
+    std::string result = app.game.resultString();
+    f << "[Event \"KindleChess\"]\n";
+    f << "[Site \"Kindle Paperwhite\"]\n";
+    f << "[Date \"" << todayForPGN() << "\"]\n";
+    f << "[Round \"-\"]\n";
+    f << "[White \"White\"]\n";
+    f << "[Black \"Black\"]\n";
+    f << "[Result \"" << result << "\"]\n\n";
+
+    auto sans = app.game.sanMoveList();
+    int chars = 0;
+    for (size_t i = 0; i < sans.size(); ++i) {
+        std::ostringstream token;
+        if (i % 2 == 0) token << (i / 2 + 1) << ". ";
+        token << sans[i] << ' ';
+        std::string t = token.str();
+        if (chars + (int)t.size() > 78) { f << "\n"; chars = 0; }
+        f << t;
+        chars += (int)t.size();
+    }
+    if (chars + (int)result.size() + 1 > 78) f << "\n";
+    f << result << "\n";
+    return "PGN exported: " + file;
+}
+
+static std::string slotSummary(int n) {
+    std::ifstream f(slot_path(n).c_str());
+    if (!f) return "Slot " + std::to_string(n) + ": Empty";
+    ChessGame tmp;
+    if (!tmp.loadFrom(slot_path(n))) return "Slot " + std::to_string(n) + ": Invalid";
+    std::ostringstream os;
+    os << "Slot " << n << ": " << tmp.uciMoves().size() << " ply, " << (tmp.whiteToMove() ? "White" : "Black") << " to move";
+    std::string over = tmp.gameOverMessage();
+    if (!over.empty()) os << ", finished";
+    return os.str();
+}
+
+static void saveSlot(int n) {
+    ensure_slots_dir();
+    app.game.saveTo(slot_path(n));
+    app.uiStatus = "Saved to slot " + std::to_string(n) + ".";
+}
+
+static bool loadSlot(int n) {
+    ChessGame tmp;
+    if (!tmp.loadFrom(slot_path(n))) {
+        app.uiStatus = "Slot " + std::to_string(n) + " is empty or invalid.";
+        return false;
+    }
+    app.game = tmp;
+    app.game.save();
+    app.selected = -1;
+    app.pendingFrom = app.pendingTo = -1;
+    app.showMoveConfirm = false;
+    app.hintFrom = app.hintTo = -1;
+    app.reviewMode = false;
+    app.reviewPly = 0;
+    app.uiStatus = "Loaded slot " + std::to_string(n) + ".";
+    updateGameOverPopup();
+    return true;
+}
+
+static void deleteSlot(int n) {
+    unlink(slot_path(n).c_str());
+    app.uiStatus = "Deleted slot " + std::to_string(n) + ".";
+}
+
+static std::string hintMoveText() {
+    if (app.hintFrom < 0 || app.hintTo < 0) return "";
+    return "Hint: " + square_name(app.hintFrom) + "-" + square_name(app.hintTo);
+}
 
 static std::string pieceShortName(char p) {
     bool white = is_white_piece(p);
@@ -1066,6 +1412,41 @@ static void drawToolbar(cairo_t* cr, int W) {
     }
 }
 
+static void drawCapturedRow(cairo_t* cr, const std::string& label, const std::vector<char>& pieces, int x, int y, int w, int cell) {
+    int fs = std::max(12, std::min(22, app.uiFontSize - 6));
+    drawTextLeft(cr, label, x, y + fs + 2, fs, true);
+    int px = x + std::max(112, fs * 7);
+    int py = y;
+    int maxX = x + w - cell;
+    for (char p : pieces) {
+        if (px > maxX) break;
+        if (!drawPieceImage(cr, p, px, py, cell)) {
+            drawTextCentered(cr, pieceLetter(p), px, py, cell, cell, fs + 2, true);
+        }
+        px += cell + 2;
+    }
+    if (pieces.empty()) drawTextLeft(cr, "None", px, y + fs + 2, fs, false);
+}
+
+static void drawCapturedPieces(cairo_t* cr, const Layout& L) {
+    auto caps = app.game.capturedPieces();
+    int cell = std::max(20, std::min(34, app.uiFontSize + 8));
+    if (L.hasPanel) {
+        int y = L.panelY + L.panelH - cell * 2 - 34;
+        if (y < L.panelY + 80) return;
+        cairo_set_source_rgb(cr, 0.0, 0.0, 0.0);
+        drawTextCentered(cr, "Captured", L.panelX, y - 28, L.panelW, 24, std::max(13, std::min(22, app.uiFontSize - 5)), true);
+        drawCapturedRow(cr, "White:", caps.first, L.panelX + 10, y, L.panelW - 20, cell);
+        drawCapturedRow(cr, "Black:", caps.second, L.panelX + 10, y + cell + 10, L.panelW - 20, cell);
+    } else {
+        int y = L.boardY + L.board + 8;
+        if (y + cell * 2 + 8 > L.H - L.statusH) return;
+        cairo_set_source_rgb(cr, 0.0, 0.0, 0.0);
+        drawCapturedRow(cr, "White captured:", caps.first, L.boardX, y, L.board, cell);
+        drawCapturedRow(cr, "Black captured:", caps.second, L.boardX, y + cell + 8, L.board, cell);
+    }
+}
+
 static void drawMovePanel(cairo_t* cr, const Layout& L) {
     if (!L.hasPanel) return;
     cairo_set_source_rgb(cr, 0.88, 0.88, 0.84);
@@ -1074,13 +1455,14 @@ static void drawMovePanel(cairo_t* cr, const Layout& L) {
     cairo_set_source_rgb(cr, 0.0, 0.0, 0.0);
     cairo_set_line_width(cr, 2.0);
     cairo_stroke(cr);
-    drawTextCentered(cr, "Moves", L.panelX, L.panelY + 6, L.panelW, 30, std::max(16, app.uiFontSize - 2), true);
-    int lineH = std::max(20, app.uiFontSize + 4);
-    int maxLines = std::max(1, (L.panelH - 48) / lineH);
+    drawTextCentered(cr, "Moves", L.panelX, L.panelY + 6, L.panelW, 30, std::max(16, std::min(26, app.uiFontSize - 2)), true);
+    int lineH = std::max(20, std::min(34, app.uiFontSize + 4));
+    int capturedReserve = 120;
+    int maxLines = std::max(1, (L.panelH - 48 - capturedReserve) / lineH);
     auto lines = moveHistoryLines(maxLines);
     int y = L.panelY + 48;
     for (const auto& line : lines) {
-        drawTextLeft(cr, line, L.panelX + 12, y, std::max(13, app.uiFontSize - 5), false);
+        drawTextLeft(cr, line, L.panelX + 12, y, std::max(13, std::min(24, app.uiFontSize - 5)), false);
         y += lineH;
     }
 }
@@ -1123,10 +1505,82 @@ static void drawConfirmNew(cairo_t* cr, const Layout& L) {
     drawButton(cr, yes, std::max(16, app.uiFontSize - 2));
 }
 
+static void drawSettingsMain(cairo_t* cr, const Layout& L, double ox, double oy, double ow, double oh) {
+    bool locked = gameSetupLocked();
+    drawTextCentered(cr, "Settings", ox, oy + 14, ow, 44, std::min(34, app.uiFontSize + 4), true);
+    drawTextCentered(cr, locked ? "Engine side and Elo are locked after the first move." : "Set engine side and Elo before making the first move.",
+                     ox + 22, oy + 58, ow - 44, 30, std::max(12, std::min(20, app.uiFontSize - 8)), false);
+
+    int bw = (int)((ow - 96) / 2.0);
+    int bh = 50;
+    int left = (int)(ox + 42);
+    int right = left + bw + 12;
+    int y = (int)(oy + 100);
+    int gap = 60;
+
+    std::string engineLabel = std::string(locked ? "Engine Locked: " : "Engine: ");
+    if (app.engineMode == EngineMode::Off) engineLabel += "Off";
+    else if (app.engineMode == EngineMode::Black) engineLabel += "Black";
+    else engineLabel += "White";
+
+    RectButton engine{engineLabel, left, y, bw * 2 + 12, bh}; y += gap;
+    RectButton eloDown{"Elo -250", left, y, bw, bh};
+    RectButton eloUp{"Elo +250", right, y, bw, bh}; y += gap;
+    RectButton eloValue{"Elo: " + std::to_string(currentEngineElo()), left, y, bw * 2 + 12, bh}; y += gap + 4;
+
+    RectButton hint{"Hint", left, y, bw, bh};
+    RectButton restart{"Restart Engine", right, y, bw, bh}; y += gap;
+    RectButton exportBtn{"Export PGN", left, y, bw, bh};
+    RectButton confirm{std::string("Confirm Moves: ") + (app.confirmMoves ? "On" : "Off"), right, y, bw, bh}; y += gap;
+    RectButton saves{"Save / Load", left, y, bw, bh};
+    RectButton review{"Review Game", right, y, bw, bh}; y += gap;
+
+    RectButton coords{std::string("Coordinates: ") + (app.showCoordinates ? "On" : "Off"), left, y, bw, bh};
+    RectButton moves{std::string("Move List: ") + (app.showMoveList ? "On" : "Off"), right, y, bw, bh}; y += gap;
+    RectButton smaller{"A-", left, y, bw, bh};
+    RectButton bigger{"A+", right, y, bw, bh}; y += gap;
+    RectButton pieceMode{std::string("Piece PNGs: ") + (app.usePieceImages ? "On" : "Off"), left, y, bw, bh};
+    RectButton reloadPieces{"Reload PNGs", right, y, bw, bh}; y += gap;
+    RectButton close{"Close Settings", left, y, bw * 2 + 12, bh};
+
+    app.overlayButtons = {engine, eloDown, eloUp, eloValue, hint, restart, exportBtn, confirm, saves, review,
+                          coords, moves, smaller, bigger, pieceMode, reloadPieces, close};
+    double fs = std::max(13, std::min(23, app.uiFontSize - 4));
+    for (const auto& b : app.overlayButtons) drawButton(cr, b, fs);
+}
+
+static void drawSaveLoadSettings(cairo_t* cr, const Layout& L, double ox, double oy, double ow, double oh) {
+    drawTextCentered(cr, "Save / Load Games", ox, oy + 14, ow, 44, std::min(34, app.uiFontSize + 4), true);
+    drawTextCentered(cr, "Five local save slots. Loading replaces the current board.", ox + 20, oy + 58, ow - 40, 30, std::max(12, std::min(20, app.uiFontSize - 8)), false);
+
+    int left = (int)(ox + 30);
+    int y = (int)(oy + 102);
+    int rowH = 76;
+    int summaryW = (int)(ow - 260);
+    int smallW = 70;
+    int bh = 42;
+    app.overlayButtons.clear();
+    double fs = std::max(12, std::min(20, app.uiFontSize - 6));
+    for (int i = 1; i <= 5; ++i) {
+        drawTextLeft(cr, slotSummary(i), left, y + 28, fs, false);
+        RectButton save{"Save " + std::to_string(i), left + summaryW, y, smallW, bh};
+        RectButton load{"Load " + std::to_string(i), left + summaryW + smallW + 8, y, smallW, bh};
+        RectButton del{"Del " + std::to_string(i), left + summaryW + (smallW + 8) * 2, y, smallW, bh};
+        app.overlayButtons.push_back(save); app.overlayButtons.push_back(load); app.overlayButtons.push_back(del);
+        drawButton(cr, save, fs); drawButton(cr, load, fs); drawButton(cr, del, fs);
+        y += rowH;
+    }
+    RectButton back{"Back", left, (int)(oy + oh - 66), 160, 50};
+    RectButton close{"Close Settings", left + 180, (int)(oy + oh - 66), 240, 50};
+    app.overlayButtons.push_back(back); app.overlayButtons.push_back(close);
+    drawButton(cr, back, std::max(13, std::min(22, app.uiFontSize - 4)));
+    drawButton(cr, close, std::max(13, std::min(22, app.uiFontSize - 4)));
+}
+
 static void drawSettings(cairo_t* cr, const Layout& L) {
     app.overlayButtons.clear();
-    double ow = std::min((double)L.W * 0.90, 820.0);
-    double oh = std::min((double)L.H * 0.76, 720.0);
+    double ow = std::min((double)L.W * 0.92, 880.0);
+    double oh = std::min((double)L.H * 0.84, 820.0);
     double ox = (L.W - ow) / 2.0;
     double oy = (L.H - oh) / 2.0;
     cairo_set_source_rgb(cr, 0.94, 0.94, 0.90);
@@ -1136,43 +1590,61 @@ static void drawSettings(cairo_t* cr, const Layout& L) {
     cairo_set_line_width(cr, 4.0);
     cairo_stroke(cr);
 
-    bool locked = gameSetupLocked();
-    drawTextCentered(cr, "Settings", ox, oy + 14, ow, 44, app.uiFontSize + 4, true);
-    drawTextCentered(cr, locked ? "Engine side and Elo are locked after the first move." : "Set engine side and Elo before making the first move.",
-                     ox + 22, oy + 62, ow - 44, 32, std::max(13, app.uiFontSize - 7), false);
+    if (app.settingsPage == 1) drawSaveLoadSettings(cr, L, ox, oy, ow, oh);
+    else drawSettingsMain(cr, L, ox, oy, ow, oh);
+}
 
-    int bw = (int)((ow - 96) / 2.0);
-    int bh = 56;
-    int left = (int)(ox + 42);
-    int right = left + bw + 12;
-    int y1 = (int)(oy + 112);
+static void drawMoveConfirm(cairo_t* cr, const Layout& L) {
+    app.overlayButtons.clear();
+    double ow = std::min((double)L.W * 0.84, 620.0);
+    double oh = 230;
+    double ox = (L.W - ow) / 2.0;
+    double oy = (L.H - oh) / 2.0;
+    cairo_set_source_rgb(cr, 0.94, 0.94, 0.90);
+    cairo_rectangle(cr, ox, oy, ow, oh);
+    cairo_fill_preserve(cr);
+    cairo_set_source_rgb(cr, 0,0,0);
+    cairo_set_line_width(cr, 4.0);
+    cairo_stroke(cr);
+    std::string text = "Confirm move " + square_name(app.confirmFrom) + "-" + square_name(app.confirmTo);
+    if (app.confirmPromotion) {
+        text += "=";
+        text.push_back((char)std::toupper((unsigned char)app.confirmPromotion));
+    }
+    text += "?";
+    drawTextCentered(cr, text, ox + 20, oy + 24, ow - 40, 60, std::min(34, app.uiFontSize + 3), true);
+    int bw = 190, bh = 56;
+    RectButton cancel{"Cancel", (int)(ox + ow/2 - bw - 12), (int)(oy + oh - bh - 28), bw, bh};
+    RectButton yes{"Confirm", (int)(ox + ow/2 + 12), (int)(oy + oh - bh - 28), bw, bh};
+    app.overlayButtons.push_back(cancel); app.overlayButtons.push_back(yes);
+    drawButton(cr, cancel, std::max(16, std::min(24, app.uiFontSize - 2)));
+    drawButton(cr, yes, std::max(16, std::min(24, app.uiFontSize - 2)));
+}
 
-    std::string engineLabel = std::string(locked ? "Engine Locked: " : "Engine: ");
-    if (app.engineMode == EngineMode::Off) engineLabel += "Off";
-    else if (app.engineMode == EngineMode::Black) engineLabel += "Black";
-    else engineLabel += "White";
-
-    RectButton engine{engineLabel, left, y1, bw * 2 + 12, bh};
-    RectButton eloDown{"Elo -250", left, y1 + 78, bw, bh};
-    RectButton eloUp{"Elo +250", right, y1 + 78, bw, bh};
-    RectButton eloValue{"Elo: " + std::to_string(currentEngineElo()), left, y1 + 156, bw * 2 + 12, bh};
-
-    RectButton coords{std::string("Coordinates: ") + (app.showCoordinates ? "On" : "Off"), left, y1 + 244, bw, bh};
-    RectButton moves{std::string("Move List: ") + (app.showMoveList ? "On" : "Off"), right, y1 + 244, bw, bh};
-    RectButton smaller{"A-", left, y1 + 322, bw, bh};
-    RectButton bigger{"A+", right, y1 + 322, bw, bh};
-    RectButton pieceMode{std::string("Piece PNGs: ") + (app.usePieceImages ? "On" : "Off"), left, y1 + 400, bw, bh};
-    RectButton reloadPieces{"Reload PNGs", right, y1 + 400, bw, bh};
-    RectButton close{"Close Settings", left, y1 + 478, bw * 2 + 12, bh};
-
-    app.overlayButtons.push_back(engine);
-    app.overlayButtons.push_back(eloDown); app.overlayButtons.push_back(eloUp); app.overlayButtons.push_back(eloValue);
-    app.overlayButtons.push_back(coords); app.overlayButtons.push_back(moves);
-    app.overlayButtons.push_back(smaller); app.overlayButtons.push_back(bigger);
-    app.overlayButtons.push_back(pieceMode); app.overlayButtons.push_back(reloadPieces);
-    app.overlayButtons.push_back(close);
-
-    for (const auto& b : app.overlayButtons) drawButton(cr, b, std::max(15, app.uiFontSize - 3));
+static void drawReviewControls(cairo_t* cr, const Layout& L) {
+    if (!app.reviewMode) { app.reviewButtons.clear(); return; }
+    app.reviewButtons.clear();
+    int total = (int)app.game.uciMoves().size();
+    int w = std::min(L.W - 40, 680);
+    int h = 92;
+    int x = (L.W - w) / 2;
+    int y = L.H - L.statusH - h - 8;
+    if (y < L.boardY + L.board - h) y = L.boardY + L.board - h - 10;
+    cairo_set_source_rgb(cr, 0.94, 0.94, 0.90);
+    cairo_rectangle(cr, x, y, w, h);
+    cairo_fill_preserve(cr);
+    cairo_set_source_rgb(cr, 0,0,0);
+    cairo_set_line_width(cr, 3.0);
+    cairo_stroke(cr);
+    drawTextCentered(cr, "Review: move " + std::to_string(app.reviewPly) + " / " + std::to_string(total), x, y + 4, w, 30, std::max(13, std::min(22, app.uiFontSize - 5)), true);
+    int bw = (w - 48) / 3;
+    RectButton prev{"Prev", x + 12, y + 42, bw, 40};
+    RectButton next{"Next", x + 24 + bw, y + 42, bw, 40};
+    RectButton exit{"Exit Review", x + 36 + bw * 2, y + 42, bw, 40};
+    app.reviewButtons.push_back(prev); app.reviewButtons.push_back(next); app.reviewButtons.push_back(exit);
+    drawButton(cr, prev, std::max(13, std::min(20, app.uiFontSize - 6)));
+    drawButton(cr, next, std::max(13, std::min(20, app.uiFontSize - 6)));
+    drawButton(cr, exit, std::max(13, std::min(20, app.uiFontSize - 6)));
 }
 
 static void drawGameOver(cairo_t* cr, const Layout& L) {
@@ -1203,11 +1675,21 @@ static gboolean on_draw(GtkWidget* widget, GdkEventExpose*, gpointer) {
 
     drawToolbar(cr, W);
 
+    Position displayPos = app.reviewMode ? app.game.positionAfterPly(app.reviewPly) : app.game.state();
+
     std::vector<Move> selectedMoves;
-    if (app.selected >= 0) selectedMoves = app.game.legalMovesFrom(app.selected);
+    if (!app.reviewMode && app.selected >= 0) selectedMoves = app.game.legalMovesFrom(app.selected);
 
     int lastFrom = -1, lastTo = -1;
-    lastMoveSquares(lastFrom, lastTo);
+    if (app.reviewMode) {
+        const auto& moves = app.game.uciMoves();
+        if (app.reviewPly > 0 && app.reviewPly <= (int)moves.size()) {
+            const std::string& u = moves[app.reviewPly - 1];
+            if (u.size() >= 4) { lastFrom = parse_square(u.substr(0,2)); lastTo = parse_square(u.substr(2,2)); }
+        }
+    } else {
+        lastMoveSquares(lastFrom, lastTo);
+    }
 
     for (int vr = 0; vr < 8; ++vr) {
         for (int vf = 0; vf < 8; ++vf) {
@@ -1226,7 +1708,18 @@ static gboolean on_draw(GtkWidget* widget, GdkEventExpose*, gpointer) {
                 cairo_fill(cr);
             }
 
-            if (s == app.selected) {
+            if (!app.reviewMode && (s == app.hintFrom || s == app.hintTo)) {
+                cairo_set_source_rgba(cr, 1.0, 1.0, 1.0, 0.42);
+                cairo_rectangle(cr, L.boardX + vf * L.cell + 8, L.boardY + vr * L.cell + 8, L.cell - 16, L.cell - 16);
+                cairo_fill(cr);
+                cairo_set_source_rgb(cr, 0.0, 0.0, 0.0);
+                cairo_set_line_width(cr, 4.0);
+                cairo_rectangle(cr, L.boardX + vf * L.cell + 8, L.boardY + vr * L.cell + 8, L.cell - 16, L.cell - 16);
+                cairo_stroke(cr);
+                cairo_set_line_width(cr, 1.0);
+            }
+
+            if (!app.reviewMode && s == app.selected) {
                 cairo_set_source_rgb(cr, 0.0, 0.0, 0.0);
                 cairo_set_line_width(cr, 4.0);
                 cairo_rectangle(cr, L.boardX + vf * L.cell + 3, L.boardY + vr * L.cell + 3, L.cell - 6, L.cell - 6);
@@ -1238,7 +1731,7 @@ static gboolean on_draw(GtkWidget* widget, GdkEventExpose*, gpointer) {
             for (const auto& m : selectedMoves) if (m.to == s) { isTarget = true; break; }
             if (isTarget) {
                 cairo_set_source_rgba(cr, 0.0, 0.0, 0.0, 0.58);
-                if (app.game.pieceAt(s) == '.') {
+                if (displayPos.b[s] == '.') {
                     cairo_arc(cr, L.boardX + vf * L.cell + L.cell / 2.0, L.boardY + vr * L.cell + L.cell / 2.0, L.cell * 0.12, 0, 6.28318);
                     cairo_fill(cr);
                 } else {
@@ -1249,7 +1742,7 @@ static gboolean on_draw(GtkWidget* widget, GdkEventExpose*, gpointer) {
                 }
             }
 
-            char p = app.game.pieceAt(s);
+            char p = displayPos.b[s];
             if (p != '.') {
                 if (!drawPieceImage(cr, p, L.boardX + vf * L.cell, L.boardY + vr * L.cell, L.cell)) {
                     double cx = L.boardX + vf * L.cell + L.cell / 2.0;
@@ -1283,8 +1776,10 @@ static gboolean on_draw(GtkWidget* widget, GdkEventExpose*, gpointer) {
     cairo_stroke(cr);
 
     drawMovePanel(cr, L);
+    drawCapturedPieces(cr, L);
 
-    std::string status = app.uiStatus.empty() ? app.game.status() : app.uiStatus;
+    std::string status = app.reviewMode ? ("Review mode. " + std::to_string(app.reviewPly) + " / " + std::to_string((int)app.game.uciMoves().size()) + " plies") : (app.uiStatus.empty() ? app.game.status() : app.uiStatus);
+    if (!app.reviewMode && app.uiStatus.empty() && !hintMoveText().empty()) status = hintMoveText();
     cairo_set_source_rgb(cr, 0.0, 0.0, 0.0);
     drawTextCentered(cr, status, L.margin, H - L.statusH + 6, W - 2 * L.margin, L.statusH * 0.58, app.uiFontSize + 2, true);
     drawTextCentered(cr, moveSummaryLine(), L.margin, H - L.statusH + L.statusH * 0.58, W - 2 * L.margin, L.statusH * 0.36, std::max(12, app.uiFontSize - 7), false);
@@ -1313,8 +1808,11 @@ static gboolean on_draw(GtkWidget* widget, GdkEventExpose*, gpointer) {
         }
     }
 
+    drawReviewControls(cr, L);
+
     if (app.showGameOver) drawGameOver(cr, L);
     else if (app.confirmNew) drawConfirmNew(cr, L);
+    else if (app.showMoveConfirm) drawMoveConfirm(cr, L);
     else if (app.showSettings) drawSettings(cr, L);
 
     cairo_destroy(cr);
@@ -1358,6 +1856,54 @@ static int boardSquareFromXY(GtkWidget* widget, int x, int y) {
     return sq(br, bf);
 }
 
+static void clearPendingMoveConfirm() {
+    app.showMoveConfirm = false;
+    app.confirmFrom = app.confirmTo = -1;
+    app.confirmPromotion = 0;
+}
+
+static void beginMoveConfirm(int from, int to, char promo = 0) {
+    app.confirmFrom = from;
+    app.confirmTo = to;
+    app.confirmPromotion = promo;
+    app.showMoveConfirm = true;
+    app.selected = -1;
+    app.pendingFrom = app.pendingTo = -1;
+}
+
+static void commitHumanMove(int from, int to, char promo = 0) {
+    app.resigned = false;
+    app.resignedMessage.clear();
+    app.showGameOver = false;
+    app.gameOverText.clear();
+    app.hintFrom = app.hintTo = -1;
+    clearPendingMoveConfirm();
+    if (app.game.makeMove(from, to, promo)) {
+        app.game.save();
+        app.selected = -1;
+        gtk_widget_queue_draw(app.area);
+        if (!updateGameOverPopup()) maybeEngineMove();
+    }
+}
+
+static void requestHint() {
+    if (app.reviewMode) { app.uiStatus = "Exit review mode before requesting a hint."; return; }
+    if (app.game.legalMoves().empty()) { app.uiStatus = "No legal moves available."; return; }
+    int elo = currentEngineElo();
+    app.uiStatus = "Stockfish calculating hint...";
+    flush_gui();
+    std::string err;
+    std::string mv = app.engine.bestMove(engine_path(), app.game.uciMoves(), std::max(750, engineMovetimeForElo(elo)), elo, err);
+    if (mv.size() >= 4) {
+        app.hintFrom = parse_square(mv.substr(0,2));
+        app.hintTo = parse_square(mv.substr(2,2));
+        app.uiStatus = "Hint: " + mv.substr(0,2) + "-" + mv.substr(2,2);
+    } else {
+        app.hintFrom = app.hintTo = -1;
+        app.uiStatus = err.empty() ? "No hint available." : err;
+    }
+}
+
 static bool handlePromotionTap(GtkWidget* widget, int x, int y) {
     if (app.pendingFrom < 0) return false;
     Layout L = computeLayout(widget);
@@ -1372,15 +1918,8 @@ static bool handlePromotionTap(GtkWidget* widget, int x, int y) {
         double bw = (ow - 52) / 4.0;
         double bh = oh - 76;
         if (x >= bx && x <= bx + bw && y >= by && y <= by + bh) {
-            app.resigned = false;
-            app.resignedMessage.clear();
-            app.showGameOver = false;
-            app.gameOverText.clear();
-            app.game.makeMove(app.pendingFrom, app.pendingTo, promos[i]);
-            app.game.save();
-            app.pendingFrom = app.pendingTo = -1;
-            app.selected = -1;
-            if (!updateGameOverPopup()) maybeEngineMove();
+            if (app.confirmMoves) beginMoveConfirm(app.pendingFrom, app.pendingTo, promos[i]);
+            else commitHumanMove(app.pendingFrom, app.pendingTo, promos[i]);
             gtk_widget_queue_draw(app.area);
             return true;
         }
@@ -1400,6 +1939,11 @@ static void startNewGameNow() {
     app.gameOverText.clear();
     app.confirmNew = false;
     app.showSettings = false;
+    app.settingsPage = 0;
+    app.reviewMode = false;
+    app.reviewPly = 0;
+    app.hintFrom = app.hintTo = -1;
+    clearPendingMoveConfirm();
     app.game.reset();
     app.selected = -1;
     app.pendingFrom = app.pendingTo = -1;
@@ -1419,6 +1963,32 @@ static bool handleConfirmTap(int x, int y) {
     return true;
 }
 
+static bool handleMoveConfirmTap(int x, int y) {
+    if (!app.showMoveConfirm) return false;
+    for (const auto& b : app.overlayButtons) {
+        if (!pointInButton(b, x, y)) continue;
+        if (b.label == "Cancel") clearPendingMoveConfirm();
+        else if (b.label == "Confirm") commitHumanMove(app.confirmFrom, app.confirmTo, app.confirmPromotion);
+        gtk_widget_queue_draw(app.area);
+        return true;
+    }
+    return true;
+}
+
+static bool handleReviewTap(int x, int y) {
+    if (!app.reviewMode) return false;
+    for (const auto& b : app.reviewButtons) {
+        if (!pointInButton(b, x, y)) continue;
+        int total = (int)app.game.uciMoves().size();
+        if (b.label == "Prev") app.reviewPly = clampInt(app.reviewPly - 1, 0, total);
+        else if (b.label == "Next") app.reviewPly = clampInt(app.reviewPly + 1, 0, total);
+        else if (b.label == "Exit Review") { app.reviewMode = false; app.reviewPly = 0; }
+        gtk_widget_queue_draw(app.area);
+        return true;
+    }
+    return false;
+}
+
 static bool handleGameOverTap(int x, int y) {
     if (!app.showGameOver) return false;
     for (const auto& b : app.overlayButtons) {
@@ -1435,6 +2005,25 @@ static bool handleSettingsTap(int x, int y) {
     for (const auto& b : app.overlayButtons) {
         if (!pointInButton(b, x, y)) continue;
         bool locked = gameSetupLocked();
+
+        if (app.settingsPage == 1) {
+            if (b.label == "Back") app.settingsPage = 0;
+            else if (b.label == "Close Settings") { app.showSettings = false; app.settingsPage = 0; }
+            else if (b.label.rfind("Save ", 0) == 0) {
+                int n = std::atoi(b.label.substr(5).c_str());
+                if (n >= 1 && n <= 5) saveSlot(n);
+            } else if (b.label.rfind("Load ", 0) == 0) {
+                int n = std::atoi(b.label.substr(5).c_str());
+                if (n >= 1 && n <= 5) loadSlot(n);
+            } else if (b.label.rfind("Del ", 0) == 0) {
+                int n = std::atoi(b.label.substr(4).c_str());
+                if (n >= 1 && n <= 5) deleteSlot(n);
+            }
+            saveAppSettings();
+            gtk_widget_queue_draw(app.area);
+            return true;
+        }
+
         if (b.label.rfind("Coordinates", 0) == 0) app.showCoordinates = !app.showCoordinates;
         else if (b.label.rfind("Move List", 0) == 0) app.showMoveList = !app.showMoveList;
         else if (b.label == "A-") app.uiFontSize = clampInt(app.uiFontSize - 2, 14, 50);
@@ -1447,12 +2036,31 @@ static bool handleSettingsTap(int x, int y) {
             app.engineEloIndex = clampInt(app.engineEloIndex - 1, 0, (int)app.engineElos.size() - 1);
         } else if (b.label == "Elo +250" && !locked) {
             app.engineEloIndex = clampInt(app.engineEloIndex + 1, 0, (int)app.engineElos.size() - 1);
+        } else if (b.label == "Hint") {
+            app.showSettings = false;
+            requestHint();
+        } else if (b.label == "Restart Engine") {
+            app.engine.stop();
+            app.uiStatus = "Engine restarted.";
+        } else if (b.label == "Export PGN") {
+            app.uiStatus = exportPGN();
+        } else if (b.label.rfind("Confirm Moves", 0) == 0) {
+            app.confirmMoves = !app.confirmMoves;
+        } else if (b.label == "Save / Load") {
+            app.settingsPage = 1;
+        } else if (b.label == "Review Game") {
+            app.reviewMode = true;
+            app.reviewPly = (int)app.game.uciMoves().size();
+            app.showSettings = false;
+            app.selected = -1;
+            app.hintFrom = app.hintTo = -1;
+            app.uiStatus = "Review mode.";
         } else if (b.label.rfind("Piece PNGs", 0) == 0) app.usePieceImages = !app.usePieceImages;
         else if (b.label == "Reload PNGs") {
             freePieceImages();
             loadPieceImages();
             app.uiStatus = haveAllPieceImages() ? "Piece PNGs loaded." : "Some piece PNGs are missing; using fallback letters.";
-        } else if (b.label == "Close Settings") app.showSettings = false;
+        } else if (b.label == "Close Settings") { app.showSettings = false; app.settingsPage = 0; }
         saveAppSettings();
         gtk_widget_queue_draw(app.area);
         return true;
@@ -1464,18 +2072,22 @@ static void clickButton(const std::string& label) {
     app.uiStatus.clear();
     if (label == "New") {
         app.confirmNew = true;
+        app.settingsPage = 0;
         app.showSettings = false;
         app.showGameOver = false;
         app.overlayButtons.clear();
     } else if (label == "Undo") {
+        if (app.reviewMode) { app.uiStatus = "Exit review mode before undo."; gtk_widget_queue_draw(app.area); return; }
         app.resigned = false;
         app.resignedMessage.clear();
         app.showGameOver = false;
         app.gameOverText.clear();
+        app.hintFrom = app.hintTo = -1;
         app.game.undo(); app.game.save(); app.selected = -1;
         if (engineShouldMove()) { app.game.undo(); app.game.save(); }
     } else if (label == "Settings") {
         app.showSettings = true;
+        app.settingsPage = 0;
         app.confirmNew = false;
         app.showGameOver = false;
         app.overlayButtons.clear();
@@ -1496,8 +2108,10 @@ static gboolean on_button(GtkWidget* widget, GdkEventButton* ev, gpointer) {
 
     if (handleGameOverTap(x, y)) return TRUE;
     if (handleConfirmTap(x, y)) return TRUE;
+    if (handleMoveConfirmTap(x, y)) return TRUE;
     if (handleSettingsTap(x, y)) return TRUE;
     if (handlePromotionTap(widget, x, y)) return TRUE;
+    if (handleReviewTap(x, y)) return TRUE;
 
     for (const auto& b : app.buttons) {
         if (pointInButton(b, x, y)) {
@@ -1505,6 +2119,7 @@ static gboolean on_button(GtkWidget* widget, GdkEventButton* ev, gpointer) {
             return TRUE;
         }
     }
+    if (app.reviewMode) return TRUE;
     if (app.resigned) return TRUE;
     if (app.showGameOver) return TRUE;
     if (engineShouldMove()) return TRUE;
@@ -1521,15 +2136,12 @@ static gboolean on_button(GtkWidget* widget, GdkEventButton* ev, gpointer) {
             if (app.game.needsPromotionChoice(app.selected, s)) {
                 app.pendingFrom = app.selected;
                 app.pendingTo = s;
-            } else if (app.game.makeMove(app.selected, s)) {
-                app.resigned = false;
-                app.resignedMessage.clear();
-                app.showGameOver = false;
-                app.gameOverText.clear();
-                app.game.save();
-                app.selected = -1;
-                gtk_widget_queue_draw(app.area);
-                if (!updateGameOverPopup()) maybeEngineMove();
+            } else {
+                bool legalDest = false;
+                for (const auto& m : app.game.legalMovesFrom(app.selected)) if (m.to == s && !m.promotion) { legalDest = true; break; }
+                if (!legalDest) app.uiStatus = "Illegal move.";
+                else if (app.confirmMoves) beginMoveConfirm(app.selected, s, 0);
+                else commitHumanMove(app.selected, s, 0);
             }
         }
     }

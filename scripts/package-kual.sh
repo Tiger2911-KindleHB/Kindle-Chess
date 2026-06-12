@@ -27,6 +27,11 @@ Custom piece PNGs:
     bk.png bq.png br.png bb.png bn.png bp.png
   Recommended size: 256x256 PNG, transparent background.
 
+Game data:
+  Autosave: /mnt/us/extensions/kindlechess/data/save.txt
+  Save slots: /mnt/us/extensions/kindlechess/data/slots
+  PGN exports: /mnt/us/extensions/kindlechess/data/games
+
 Optional engine:
   Put a Kindle-compatible Stockfish/UCI binary here:
   /mnt/us/extensions/kindlechess/bin/stockfish

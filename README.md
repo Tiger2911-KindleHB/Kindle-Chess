@@ -15,13 +15,20 @@ Native GTK2 chess app for jailbroken Kindle devices, intended for KUAL launch.
 - Exit button
 - Optional board coordinates
 - Optional move-history panel
+- Captured-piece display
 - Settings overlay
 - A-/A+ UI font controls, up to size 50
+- Optional move confirmation popup
 - Save/resume using `/mnt/us/extensions/kindlechess/data/save.txt`
+- Five manual save slots in `/mnt/us/extensions/kindlechess/data/slots/`
+- PGN export to `/mnt/us/extensions/kindlechess/data/games/`
+- Review mode with previous/next controls
 - Persistent settings using `/mnt/us/extensions/kindlechess/data/settings.txt`
 - Optional local Stockfish/UCI engine support
 - Engine side and approximate Elo configured in Settings before the first move
-- Checkmate/stalemate game-over popup with New Game button
+- Hint button using Stockfish
+- Restart Engine maintenance button
+- Better game-over popups with New Game button
 - Optional custom PNG chess pieces
 - Designed for slow, high-contrast E Ink interaction
 
@@ -29,7 +36,7 @@ Native GTK2 chess app for jailbroken Kindle devices, intended for KUAL launch.
 
 - **New**: asks for confirmation, then resets the board.
 - **Undo**: takes back the previous move. When playing against the engine, it attempts to take back the engine reply too.
-- **Settings**: opens display, engine, Elo, and piece-image options.
+- **Settings**: opens display, engine, Elo, save/load, PGN, hint, review, and piece-image options.
 - **Exit**: saves and returns to KUAL.
 
 Removed from the top bar in this build:
@@ -44,6 +51,12 @@ Settings include:
 
 - **Engine**: cycles Off / Black / White.
 - **Elo -250 / Elo +250**: changes the engine strength display in 250 Elo steps.
+- **Hint**: asks Stockfish for a suggested move and highlights the source/destination squares.
+- **Restart Engine**: stops the Stockfish child process; it will restart on the next engine request.
+- **Export PGN**: writes a PGN file to `data/games/`.
+- **Confirm Moves**: toggles a confirmation popup before committing human moves.
+- **Save / Load**: opens five manual save slots with Save, Load, and Delete buttons.
+- **Review Game**: enters review mode with Prev / Next / Exit Review controls.
 - **Coordinates**: toggles board coordinate labels.
 - **Move List**: toggles the move-history panel.
 - **A- / A+**: changes UI font size from 14 up to 50.
